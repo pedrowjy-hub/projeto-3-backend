@@ -16,15 +16,15 @@ def test_listar_dados_ok(mock_conectar_db):
     mock_collection = mock_db.__getitem__.return_value
 
     usuarios = [
-        {'username':'pedrow2','nome':'Pedro','email':'email@email.com','contato':'(11)99999-9999','tipo':'influenciador','nicho':'moda','plataformas':['Tiktok','Instagram'],'assinatura':True,'expiracao_assinatura':'23-10-2026'},
-        {'username':'teste','nome':'teste','email':'teste@email.com','contato':'(11)99999-9999','tipo':'admin','nicho':'moda','plataformas':['Tiktok'],'assinatura':False,'expiracao_assinatura':'-'}
+        {"username":"pedrow2","nome":"Pedro","email":"email@email.com","contato":"(11)99999-9999","tipo":"influenciador","nicho":"moda","plataformas":["Tiktok","Instagram"],"assinatura":True,"expiracao_assinatura":"23-10-2026"},
+        {"username":"teste","nome":"teste","email":"teste@email.com","contato":"(11)99999-9999","tipo":"admin","nicho":"moda","plataformas":["Tiktok"],"assinatura":False,"expiracao_assinatura":"-"}
     ]
 
     mock_collection.find.return_value = usuarios
 
-    response = app.client().get('/usuarios')
+    response = app.client().get("/usuarios")
 
     assert response.status_code == 200
     assert response.get_json() == usuarios
-    mock_collection.find.assert_called_once_with({},{'_id':0})
+    mock_collection.find.assert_called_once_with({},{"_id":0})
 
