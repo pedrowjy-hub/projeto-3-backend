@@ -57,7 +57,7 @@ def test_deletar_user_404():
 @patch("api.conectar_db")
 def test_listar_dados_ok(mock_conectar_db):
 
-    mock_db = mock_conectar_db
+    mock_db = mock_conectar_db.return_value
     mock_collection = mock_db.__getitem__.return_value
 
     usuarios = [
@@ -67,11 +67,22 @@ def test_listar_dados_ok(mock_conectar_db):
 
     mock_collection.find.return_value = usuarios
 
-    response = app.client().get("/usuarios")
+    response = app.test_client().get("/usuarios")
 
     assert response.status_code == 200
     assert response.get_json() == usuarios
     mock_collection.find.assert_called_once_with({},{"_id":0})
+
+@patch("api.conectar_db")
+def test_listar_sem_dados(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find.return_value = []
+
+    response = app.test_client().get("/usuarios")
+
+    assert response.status_code == 200
+    assert response.get_json() == []
+    colecao.find.assert_called_once_with({}, {"_id": 0})
 
 @pytest.mark.parametrize(
     "novo_user",
