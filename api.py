@@ -51,6 +51,49 @@ def delete_user(username):
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
 
+@app.route("/usuarios",methods=['POST'])
+def criar_user():
+
+    novo_usuario = request.get_json(silent=True)
+
+    campos_obrigatorios = [
+            "email",
+            "contato",
+            "tipo",
+            "nicho",
+            "plataformas",
+            "assinatura",
+            "expiracao_assinatura",
+        ]
+
+    campos_faltantes = [
+        campo for campo in campos_obrigatorios
+        if campo not in novo_usuario
+    ]
+
+    if campos_faltantes:
+        return jsonify({
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": campos_faltantes
+    }),400
+
+    colecao = conectar_db()['tbl_teste']
+    usuario_existente = colecao.find_one(
+        {"username":novo_usuario["username"]}
+    )
+
+    if isinstance(usuario_existente, dict):
+        return jsonify(
+            {"erro": "Conflito: username já cadastrado"}
+        ),409
+
+    colecao.insert_one(novo_usuario)
+
+    return jsonify(
+        {
+        "mensagem": "Usuário criado com sucesso",
+        "usuario": novo_usuario["username"],
+    }),201
 
 @app.route('/usuarios/<string:username>', methods=['PUT'])
 def editar_user(username):
