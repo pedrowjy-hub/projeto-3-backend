@@ -1,6 +1,6 @@
 import os
 from functools import lru_cache
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -39,6 +39,48 @@ def delete_user(username):
     if usuario.deleted_count == 0:
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
+
+
+@app.route('/usuarios/<string:username>', methods=['PUT'])
+def editar_user(username):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_obrigatorios = ["nome", "email", "contato", "tipo", "nicho", "plataformas"]
+    campos_faltantes = [campo for campo in campos_obrigatorios if campo not in dados]
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    for campo in ["nome", "email", "contato", "tipo", "nicho"]:
+        if not isinstance(dados[campo], str) or not dados[campo].strip():
+            return jsonify({"erro": f"Valor inválido para {campo}"}), 422
+
+    if not isinstance(dados["plataformas"], list) or not all(
+        isinstance(plataforma, str) and plataforma.strip()
+        for plataforma in dados["plataformas"]
+    ):
+        return jsonify({"erro": "Valor inválido para plataformas"}), 422
+
+    colecao = conectar_db()["tbl_testes"]
+    usuario = colecao.find_one({"username": username})
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    for campo in ["email", "contato"]:
+        conflito = colecao.find_one({campo: dados[campo], "username": {"$ne": username}})
+        if conflito is not None:
+            return jsonify({"erro": f"Conflito: {campo} já cadastrado"}), 409
+
+    atualizacao = {campo: dados[campo] for campo in campos_obrigatorios}
+    resultado = colecao.update_one({"username": username}, {"$set": atualizacao})
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)

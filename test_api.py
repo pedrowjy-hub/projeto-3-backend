@@ -73,3 +73,103 @@ def test_listar_dados_ok(mock_conectar_db):
     assert response.get_json() == usuarios
     mock_collection.find.assert_called_once_with({},{"_id":0})
 
+
+
+
+def test_editar_user_sucesso():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [
+            {"username": "rafacelduds"},
+            None,
+            None,
+        ]
+        colecao.update_one.return_value.matched_count = 1
+        dados = {
+            "nome": "Rafael",
+            "email": "rafael@example.com",
+            "contato": "11999999999",
+            "tipo": "influenciador",
+            "nicho": "moda",
+            "plataformas": ["Instagram", "TikTok"],
+        }
+
+        response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+
+        assert response.status_code == 200
+        assert response.json == {"mensagem": "Usuário atualizado com sucesso"}
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": dados},
+        )
+
+
+def test_editar_user_404():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = None
+        dados = {
+            "nome": "Rafael",
+            "email": "rafael@example.com",
+            "contato": "11999999999",
+            "tipo": "influenciador",
+            "nicho": "moda",
+            "plataformas": ["Instagram"],
+        }
+
+        response = app.test_client().put("/usuarios/fulano", json=dados)
+
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário não encontrado"}
+        colecao.update_one.assert_not_called()
+
+
+def test_editar_user_400_campos_faltantes():
+    dados = {"nome": "Rafael", "email": "rafael@example.com"}
+
+    response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": ["contato", "tipo", "nicho", "plataformas"],
+    }
+
+
+def test_editar_user_409_email_em_uso():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [
+            {"username": "rafacelduds"},
+            {"username": "outro_usuario"},
+        ]
+        dados = {
+            "nome": "Rafael",
+            "email": "usado@example.com",
+            "contato": "11999999999",
+            "tipo": "influenciador",
+            "nicho": "moda",
+            "plataformas": ["Instagram"],
+        }
+
+        response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+
+        assert response.status_code == 409
+        assert response.json == {"erro": "Conflito: email já cadastrado"}
+        colecao.update_one.assert_not_called()
+
+
+def test_editar_user_422_plataformas_invalidas():
+    dados = {
+        "nome": "Rafael",
+        "email": "rafael@example.com",
+        "contato": "11999999999",
+        "tipo": "influenciador",
+        "nicho": "moda",
+        "plataformas": "Instagram",
+    }
+
+    response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+
+    assert response.status_code == 422
+    assert response.json == {"erro": "Valor inválido para plataformas"}
