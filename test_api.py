@@ -107,7 +107,7 @@ def test_listar_sem_dados(mock_conectar_db):
             "nicho": "moda",
             "plataformas": ["Instagram", "TikTok"],
             "assinatura": False,
-            "expiracao_assinatura": "-",
+            "expiracao_assinatura": None,
         },
     ],
     ids=["influenciador", "empresa"],
@@ -176,8 +176,6 @@ def test_criar_user_username_ja_cadastrado(mock_conectar_db):
     assert response.get_json() == {"erro": "Conflito: username já cadastrado"}
     colecao.find_one.assert_called_once_with({"username": "pedrow2"})
     colecao.insert_one.assert_not_called()
-
-
 
 def test_editar_user_sucesso():
     with patch("api.conectar_db") as conn:
