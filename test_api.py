@@ -73,6 +73,98 @@ def test_listar_dados_ok(mock_conectar_db):
     assert response.get_json() == usuarios
     mock_collection.find.assert_called_once_with({},{"_id":0})
 
+@pytest.mark.parametrize(
+    "novo_user",
+    [
+        {
+            "username": "pedrow2",
+            "nome": "Pedro",
+            "email": "pedro@email.com",
+            "contato": "(11)99999-9999",
+            "tipo": "influenciador",
+            "nicho": "moda",
+            "plataformas": ["TikTok", "Instagram"],
+            "assinatura": True,
+            "expiracao_assinatura": "23-10-2026",
+        },
+        {
+            "username": "moda_urbana",
+            "nome": "Moda Urbana",
+            "email": "contato@modaurbana.com",
+            "contato": "(11)98888-8888",
+            "tipo": "empresa",
+            "nicho": "moda",
+            "plataformas": ["Instagram", "TikTok"],
+            "assinatura": False,
+            "expiracao_assinatura": "-",
+        },
+    ],
+    ids=["influenciador", "empresa"],
+)
+@patch("api.conectar_db")
+def test_criar_user_ok(mock_conectar_db, novo_user):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+
+    response = app.test_client().post("/usuarios", json=novo_user)
+
+    assert response.status_code == 201
+    assert response.get_json() == {
+        "mensagem": "Usuário criado com sucesso",
+        "usuario": novo_user["username"],
+    }
+    colecao.insert_one.assert_called_once_with(novo_user)
+
+def test_criar_user_campos_obrigatorios_ausentes():
+
+    payload = {"username": "pedrow2", "nome": "Pedro"}
+    response = app.test_client().post(
+        "/usuarios",
+        json=payload,
+    )
+
+    campos_obrigatorios = [
+            "email",
+            "contato",
+            "tipo",
+            "nicho",
+            "plataformas",
+            "assinatura",
+            "expiracao_assinatura",
+        ]
+    
+    campos_faltantes = [
+        campo_faltante for campo_faltante in campos_obrigatorios 
+        if campo_faltante not in payload
+    ]
+    
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": campos_faltantes
+    }
+
+@patch("api.conectar_db")
+def test_criar_user_username_ja_cadastrado(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = {"username": "pedrow2"}
+    novo_user = {
+        "username": "pedrow2",
+        "nome": "Pedro",
+        "email": "pedro@email.com",
+        "contato": "(11)99999-9999",
+        "tipo": "influenciador",
+        "nicho": "moda",
+        "plataformas": ["TikTok"],
+        "assinatura": True,
+        "expiracao_assinatura": "23-10-2026",
+    }
+
+    response = app.test_client().post("/usuarios", json=novo_user)
+
+    assert response.status_code == 409
+    assert response.get_json() == {"erro": "Conflito: username já cadastrado"}
+    colecao.find_one.assert_called_once_with({"username": "pedrow2"})
+    colecao.insert_one.assert_not_called()
 
 
 
