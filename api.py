@@ -19,6 +19,17 @@ def conectar_db():
     return get_client()[os.getenv("MONGO_DB", "projeto3")]
 
 
+@app.route('/usuarios',methods=['GET'])
+def lista_users():
+    usuarios = list(
+        conectar_db()['tbl_testes'].find(
+            {},
+            {"_id":0},
+        )
+    )
+
+    return  jsonify(usuarios),200
+
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
     usuario = conectar_db()["tbl_testes"].find_one(
