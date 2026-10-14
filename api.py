@@ -57,6 +57,8 @@ def criar_user():
     novo_usuario = request.get_json(silent=True)
 
     campos_obrigatorios = [
+            "nome",
+            "username",
             "email",
             "contato",
             "tipo",
