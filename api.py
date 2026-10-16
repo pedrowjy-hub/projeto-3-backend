@@ -137,5 +137,133 @@ def editar_user(username):
 
     return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
 
+
+def buscar_chat(id_influenciador, id_empresa):
+    return conectar_db()["chats"].find_one(
+        {
+            "id_influenciador": id_influenciador,
+            "id_empresa": id_empresa,
+        },
+        {"_id": 0},
+    )
+
+
+@app.route("/chats", methods=["POST"])
+def criar_chat():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_obrigatorios = ["id_influenciador", "id_empresa"]
+    campos_faltantes = [
+        campo for campo in campos_obrigatorios if campo not in dados
+    ]
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    if not all(
+        isinstance(dados[campo], str) and dados[campo].strip()
+        for campo in campos_obrigatorios
+    ):
+        return jsonify({"erro": "IDs dos usuários inválidos"}), 422
+
+    colecao = conectar_db()["chats"]
+    filtro = {
+        "id_influenciador": dados["id_influenciador"],
+        "id_empresa": dados["id_empresa"],
+    }
+    if colecao.find_one(filtro) is not None:
+        return jsonify({"erro": "Chat já existe"}), 409
+
+    chat = {
+        **filtro,
+        "conversa": [],
+        "arquivos": [],
+    }
+    colecao.insert_one(chat)
+    return jsonify({"mensagem": "Chat criado com sucesso", "chat": chat}), 201
+
+
+@app.route("/chats/<string:id_influenciador>/<string:id_empresa>", methods=["GET"])
+def buscar_chat_por_usuarios(id_influenciador, id_empresa):
+    chat = buscar_chat(id_influenciador, id_empresa)
+    if chat is None:
+        return jsonify({"erro": "Chat não encontrado"}), 404
+    return jsonify(chat), 200
+
+
+@app.route("/chats/<string:id_influenciador>/<string:id_empresa>/mensagens", methods=["POST"])
+def enviar_mensagem(id_influenciador, id_empresa):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_obrigatorios = ["remetente_id", "mensagem"]
+    campos_faltantes = [
+        campo for campo in campos_obrigatorios if campo not in dados
+    ]
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    if (
+        dados["remetente_id"] not in {id_influenciador, id_empresa}
+        or not isinstance(dados["mensagem"], str)
+        or not dados["mensagem"].strip()
+    ):
+        return jsonify({"erro": "Mensagem inválida"}), 422
+
+    filtro = {
+        "id_influenciador": id_influenciador,
+        "id_empresa": id_empresa,
+    }
+    resultado = conectar_db()["chats"].update_one(
+        filtro,
+        {"$push": {"conversa": dados}},
+    )
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Chat não encontrado"}), 404
+    return jsonify({"mensagem": "Mensagem enviada com sucesso"}), 201
+
+
+@app.route("/chats/<string:id_influenciador>/<string:id_empresa>/arquivos", methods=["POST"])
+def adicionar_arquivo(id_influenciador, id_empresa):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_obrigatorios = ["nome", "url", "tipo"]
+    campos_faltantes = [
+        campo for campo in campos_obrigatorios if campo not in dados
+    ]
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    if not all(
+        isinstance(dados[campo], str) and dados[campo].strip()
+        for campo in campos_obrigatorios
+    ):
+        return jsonify({"erro": "Arquivo inválido"}), 422
+
+    filtro = {
+        "id_influenciador": id_influenciador,
+        "id_empresa": id_empresa,
+    }
+    resultado = conectar_db()["chats"].update_one(
+        filtro,
+        {"$push": {"arquivos": dados}},
+    )
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Chat não encontrado"}), 404
+    return jsonify({"mensagem": "Arquivo adicionado com sucesso"}), 201
+
 if __name__ == '__main__':
     app.run(debug=True)
