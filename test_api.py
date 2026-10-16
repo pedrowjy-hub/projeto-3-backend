@@ -496,3 +496,164 @@ def test_login_identificador_vazio(client):
     assert response.json == {
         "erro": "Identificador e senha são obrigatórios"
     }
+
+
+@patch("api.conectar_db")
+def test_criar_chat_ok(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
+    payload = {
+        "id_influenciador": "influenciador_1",
+        "id_empresa": "empresa_1",
+    }
+
+    response = app.test_client().post("/chats", json=payload)
+
+    chat_esperado = {**payload, "conversa": [], "arquivos": []}
+    assert response.status_code == 201
+    assert response.get_json() == {
+        "mensagem": "Chat criado com sucesso",
+        "chat": chat_esperado,
+    }
+    colecao.find_one.assert_called_once_with(payload)
+    colecao.insert_one.assert_called_once_with(chat_esperado)
+
+
+def test_criar_chat_campos_obrigatorios_ausentes():
+    response = app.test_client().post(
+        "/chats",
+        json={"id_influenciador": "influenciador_1"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": ["id_empresa"],
+    }
+
+
+@patch("api.conectar_db")
+def test_criar_chat_duplicado(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    payload = {
+        "id_influenciador": "influenciador_1",
+        "id_empresa": "empresa_1",
+    }
+    colecao.find_one.return_value = payload
+
+    response = app.test_client().post("/chats", json=payload)
+
+    assert response.status_code == 409
+    assert response.get_json() == {"erro": "Chat já existe"}
+    colecao.insert_one.assert_not_called()
+
+
+@patch("api.conectar_db")
+def test_buscar_chat_ok(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    chat = {
+        "id_influenciador": "influenciador_1",
+        "id_empresa": "empresa_1",
+        "conversa": [],
+        "arquivos": [],
+    }
+    colecao.find_one.return_value = chat
+
+    response = app.test_client().get("/chats/influenciador_1/empresa_1")
+
+    assert response.status_code == 200
+    assert response.get_json() == chat
+    colecao.find_one.assert_called_once_with(
+        {"id_influenciador": "influenciador_1", "id_empresa": "empresa_1"},
+        {"_id": 0},
+    )
+
+
+@patch("api.conectar_db")
+def test_buscar_chat_404(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
+
+    response = app.test_client().get("/chats/influenciador_1/empresa_1")
+
+    assert response.status_code == 404
+    assert response.get_json() == {"erro": "Chat não encontrado"}
+
+
+@patch("api.conectar_db")
+def test_enviar_mensagem_ok(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.update_one.return_value.matched_count = 1
+    mensagem = {"remetente_id": "influenciador_1", "mensagem": "Olá!"}
+
+    response = app.test_client().post(
+        "/chats/influenciador_1/empresa_1/mensagens",
+        json=mensagem,
+    )
+
+    assert response.status_code == 201
+    assert response.get_json() == {"mensagem": "Mensagem enviada com sucesso"}
+    colecao.update_one.assert_called_once_with(
+        {"id_influenciador": "influenciador_1", "id_empresa": "empresa_1"},
+        {"$push": {"conversa": mensagem}},
+    )
+
+
+def test_enviar_mensagem_remetente_invalido():
+    response = app.test_client().post(
+        "/chats/influenciador_1/empresa_1/mensagens",
+        json={"remetente_id": "terceiro", "mensagem": "Olá!"},
+    )
+
+    assert response.status_code == 422
+    assert response.get_json() == {"erro": "Mensagem inválida"}
+
+
+@patch("api.conectar_db")
+def test_enviar_mensagem_chat_inexistente(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.update_one.return_value.matched_count = 0
+
+    response = app.test_client().post(
+        "/chats/influenciador_1/empresa_1/mensagens",
+        json={"remetente_id": "empresa_1", "mensagem": "Olá!"},
+    )
+
+    assert response.status_code == 404
+    assert response.get_json() == {"erro": "Chat não encontrado"}
+
+
+@patch("api.conectar_db")
+def test_adicionar_arquivo_ok(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.update_one.return_value.matched_count = 1
+    arquivo = {
+        "nome": "proposta.pdf",
+        "url": "https://exemplo.com/proposta.pdf",
+        "tipo": "application/pdf",
+    }
+
+    response = app.test_client().post(
+        "/chats/influenciador_1/empresa_1/arquivos",
+        json=arquivo,
+    )
+
+    assert response.status_code == 201
+    assert response.get_json() == {"mensagem": "Arquivo adicionado com sucesso"}
+    colecao.update_one.assert_called_once_with(
+        {"id_influenciador": "influenciador_1", "id_empresa": "empresa_1"},
+        {"$push": {"arquivos": arquivo}},
+    )
+
+
+def test_adicionar_arquivo_campos_obrigatorios_ausentes():
+    response = app.test_client().post(
+        "/chats/influenciador_1/empresa_1/arquivos",
+        json={"nome": "proposta.pdf"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": ["url", "tipo"],
+    }
