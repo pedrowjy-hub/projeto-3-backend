@@ -106,8 +106,7 @@ def test_listar_sem_dados(mock_conectar_db):
             "tipo": "empresa",
             "nicho": "moda",
             "plataformas": ["Instagram", "TikTok"],
-            "assinatura": False,
-            "expiracao_assinatura": None,
+            "assinatura": False
         },
     ],
     ids=["influenciador", "empresa"],
@@ -140,7 +139,6 @@ def test_criar_user_campos_obrigatorios_ausentes():
             "nicho",
             "plataformas",
             "assinatura",
-            "expiracao_assinatura",
         ]
     
     campos_faltantes = [
