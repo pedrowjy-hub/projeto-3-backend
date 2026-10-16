@@ -64,8 +64,7 @@ def criar_user():
             "tipo",
             "nicho",
             "plataformas",
-            "assinatura",
-            "expiracao_assinatura",
+            "assinatura"
         ]
 
     campos_faltantes = [
