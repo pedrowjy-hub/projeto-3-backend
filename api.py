@@ -56,7 +56,7 @@ def delete_user(username):
 @app.route("/usuarios",methods=['POST'])
 def criar_user():
 
-    novo_usuario = request.get_json(silent=True)
+    novo_usuario = request.get_json(silent=True) or {}
 
     campos_obrigatorios = [
             "nome",
@@ -81,7 +81,14 @@ def criar_user():
         "campos_faltantes": campos_faltantes
     }),400
 
-    colecao = conectar_db()['tbl_teste']
+    senha = novo_usuario.get("senha")
+
+    if not isinstance(senha,str) or not senha:
+        return jsonify({"erro": "Senha inválida"}),400
+
+    novo_usuario["senha"] = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    colecao = conectar_db()['tbl_testes']
     usuario_existente = colecao.find_one(
         {"username":novo_usuario["username"]}
     )

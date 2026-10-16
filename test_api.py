@@ -117,14 +117,22 @@ def test_listar_sem_dados(mock_conectar_db):
 def test_criar_user_ok(mock_conectar_db, novo_user):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
 
-    response = app.test_client().post("/usuarios", json=novo_user)
 
+    senha_hash = hashlib.sha256(
+        novo_user["senha"].encode("utf-8")
+    ).hexdigest()
+
+    usuario_esperado = novo_user.copy()
+    usuario_esperado["senha"] = senha_hash
+
+    response = app.test_client().post("/usuarios", json=novo_user)
+    
     assert response.status_code == 201
     assert response.get_json() == {
         "mensagem": "Usuário criado com sucesso",
         "usuario": novo_user["username"],
     }
-    colecao.insert_one.assert_called_once_with(novo_user)
+    colecao.insert_one.assert_called_once_with(usuario_esperado)
 
 def test_criar_user_campos_obrigatorios_ausentes():
 
@@ -178,6 +186,32 @@ def test_criar_user_username_ja_cadastrado(mock_conectar_db):
     assert response.get_json() == {"erro": "Conflito: username já cadastrado"}
     colecao.find_one.assert_called_once_with({"username": "pedrow2"})
     colecao.insert_one.assert_not_called()
+
+@patch("api.conectar_db")
+def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+
+    novo_user = {
+        "username": "pedrow2",
+        "nome": "Pedro",
+        "email": "pedro@email.com",
+        "contato": "(11)99999-9999",
+        "tipo": "influenciador",
+        "nicho": "moda",
+        "plataformas": ["TikTok"],
+        "assinatura": False,
+        "senha": "minha_senha",
+    }
+
+    app.test_client().post("/usuarios", json=novo_user)
+
+    usuario_salvo = colecao.insert_one.call_args.args[0]
+
+    assert usuario_salvo["senha"] != "minha_senha"
+    assert usuario_salvo["senha"] == hashlib.sha256(
+        "minha_senha".encode("utf-8")
+    ).hexdigest()
+
 
 def test_editar_user_sucesso():
     with patch("api.conectar_db") as conn:
