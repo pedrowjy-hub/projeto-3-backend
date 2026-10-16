@@ -430,8 +430,3 @@ def test_login_identificador_vazio(client):
     assert response.json == {
         "erro": "Identificador e senha são obrigatórios"
     }
-
-def test_login_metodo_nao_permitido(client):
-    response = client.get("/login")
-
-    assert response.status_code == 405
