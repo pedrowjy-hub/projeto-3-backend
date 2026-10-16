@@ -216,25 +216,45 @@ def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
 def test_editar_user_sucesso():
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.side_effect = [
-            {"username": "rafacelduds"},
-            None,
-            None,
-        ]
-        colecao.update_one.return_value.matched_count = 1
-        dados = {
-            "nome": "Rafael",
-            "email": "rafael@example.com",
-            "contato": "11999999999",
-            "tipo": "influenciador",
-            "nicho": "moda",
-            "plataformas": ["Instagram", "TikTok"],
-        }
+        colecao.find_one.return_value = {"username": "rafacelduds"}
+        dados = {"nome": "Rafael"}
 
-        response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
 
         assert response.status_code == 200
         assert response.json == {"mensagem": "Usuário atualizado com sucesso"}
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": dados},
+        )
+
+
+def test_editar_user_com_descricao():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        dados = {
+            "descricao": "Criador de conteúdo sobre moda e estilo.",
+        }
+        colecao.find_one.return_value = {"username": "rafacelduds"}
+
+        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+
+        assert response.status_code == 200
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": dados},
+        )
+
+
+def test_editar_user_permite_descricao_vazia():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {"username": "rafacelduds"}
+        dados = {"descricao": ""}
+
+        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+
+        assert response.status_code == 200
         colecao.update_one.assert_called_once_with(
             {"username": "rafacelduds"},
             {"$set": dados},
@@ -245,32 +265,32 @@ def test_editar_user_404():
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = None
-        dados = {
-            "nome": "Rafael",
-            "email": "rafael@example.com",
-            "contato": "11999999999",
-            "tipo": "influenciador",
-            "nicho": "moda",
-            "plataformas": ["Instagram"],
-        }
+        dados = {"descricao": "Uma descrição"}
 
-        response = app.test_client().put("/usuarios/fulano", json=dados)
+        response = app.test_client().patch("/usuarios/fulano", json=dados)
 
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário não encontrado"}
         colecao.update_one.assert_not_called()
 
 
-def test_editar_user_400_campos_faltantes():
-    dados = {"nome": "Rafael", "email": "rafael@example.com"}
+def test_editar_user_400_sem_campos():
+    dados = {}
 
-    response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+    response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
 
     assert response.status_code == 400
-    assert response.json == {
-        "erro": "Campos obrigatórios ausentes",
-        "campos_faltantes": ["contato", "tipo", "nicho", "plataformas"],
-    }
+    assert response.json == {"erro": "Envie ao menos um campo para editar"}
+
+
+def test_editar_user_422_campo_essencial_vazio():
+    response = app.test_client().patch(
+        "/usuarios/rafacelduds",
+        json={"nome": ""},
+    )
+
+    assert response.status_code == 422
+    assert response.json == {"erro": "Valor inválido para nome"}
 
 
 def test_editar_user_409_email_em_uso():
@@ -280,16 +300,9 @@ def test_editar_user_409_email_em_uso():
             {"username": "rafacelduds"},
             {"username": "outro_usuario"},
         ]
-        dados = {
-            "nome": "Rafael",
-            "email": "usado@example.com",
-            "contato": "11999999999",
-            "tipo": "influenciador",
-            "nicho": "moda",
-            "plataformas": ["Instagram"],
-        }
+        dados = {"email": "usado@example.com"}
 
-        response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
 
         assert response.status_code == 409
         assert response.json == {"erro": "Conflito: email já cadastrado"}
@@ -297,16 +310,9 @@ def test_editar_user_409_email_em_uso():
 
 
 def test_editar_user_422_plataformas_invalidas():
-    dados = {
-        "nome": "Rafael",
-        "email": "rafael@example.com",
-        "contato": "11999999999",
-        "tipo": "influenciador",
-        "nicho": "moda",
-        "plataformas": "Instagram",
-    }
+    dados = {"plataformas": []}
 
-    response = app.test_client().put("/usuarios/rafacelduds", json=dados)
+    response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
 
     assert response.status_code == 422
     assert response.json == {"erro": "Valor inválido para plataformas"}
