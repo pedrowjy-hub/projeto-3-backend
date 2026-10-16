@@ -4,6 +4,7 @@ from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime
+import hashlib
 
 load_dotenv()
 app =  Flask(__name__)
@@ -55,7 +56,7 @@ def delete_user(username):
 @app.route("/usuarios",methods=['POST'])
 def criar_user():
 
-    novo_usuario = request.get_json(silent=True)
+    novo_usuario = request.get_json(silent=True) or {}
 
     campos_obrigatorios = [
             "nome",
@@ -80,7 +81,14 @@ def criar_user():
         "campos_faltantes": campos_faltantes
     }),400
 
-    colecao = conectar_db()['tbl_teste']
+    senha = novo_usuario.get("senha")
+
+    if not isinstance(senha,str) or not senha:
+        return jsonify({"erro": "Senha inválida"}),400
+
+    novo_usuario["senha"] = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    colecao = conectar_db()['tbl_testes']
     usuario_existente = colecao.find_one(
         {"username":novo_usuario["username"]}
     )
@@ -194,7 +202,40 @@ def alterar_assinatura(username):
         "mensagem": "Assinatura atualizada com sucesso"
     }), 200
 
+@app.route("/login",methods=["POST"])
+def login():
+    dados = request.get_json(silent=True) or {}
 
+    identificador = dados.get("identificador")
+    senha = dados.get("senha")
+
+    if (
+        not isinstance(identificador,str) 
+        or not identificador.strip()
+        or not isinstance(senha,str)
+        or not senha
+    ):
+        return jsonify({
+            "erro": "Identificador e senha são obrigatórios"
+        }),400
+
+    colecao = conectar_db()["tbl_testes"]
+
+    usuario = colecao.find_one({
+        "$or": [
+            {"username": identificador},
+            {"email": identificador},
+        ]
+    })
+
+    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    if usuario is None or usuario.get("senha") != senha_hash:
+        return jsonify({"erro": "Credenciais inválidas"}),401
+
+    return jsonify(
+        {"mensagem": "Login realizado com sucesso"}
+    ),200
 
 
 def buscar_chat(id_influenciador, id_empresa):
