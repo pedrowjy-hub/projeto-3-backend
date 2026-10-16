@@ -4,6 +4,7 @@ from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime
+import hashlib
 
 load_dotenv()
 app =  Flask(__name__)
@@ -194,7 +195,40 @@ def alterar_assinatura(username):
         "mensagem": "Assinatura atualizada com sucesso"
     }), 200
 
+@app.route("/login",methods=["POST"])
+def login():
+    dados = request.get_json(silent=True) or {}
 
+    identificador = dados.get("identificador")
+    senha = dados.get("senha")
+
+    if (
+        not isinstance(identificador,str) 
+        or not identificador.strip()
+        or not isinstance(senha,str)
+        or not senha
+    ):
+        return jsonify({
+            "erro": "Identificador e senha são obrigatórios"
+        }),400
+
+    colecao = conectar_db()["tbl_testes"]
+
+    usuario = colecao.find_one({
+        "$or": [
+            {"username": identificador},
+            {"email": identificador},
+        ]
+    })
+
+    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    if usuario is None or usuario.get("senha") != senha_hash:
+        return jsonify({"erro": "Credenciais inválidas"}),401
+
+    return jsonify(
+        {"mensagem": "Login realizado com sucesso"}
+    ),200
 
 
 if __name__ == '__main__':
