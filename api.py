@@ -387,6 +387,54 @@ def adicionar_arquivo(id_influenciador, id_empresa):
         return jsonify({"erro": "Chat não encontrado"}), 404
     return jsonify({"mensagem": "Arquivo adicionado com sucesso"}), 201
 
+@app.route("/usuarios/<string:username>/avaliacoes", methods=['POST'])
+def avaliar(username):
+    dados = request.get_json(silent=True)
+
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_obrigatorios = ["username", "alvo", "nota", "conteudo"]
+    campos_faltantes = [campo for campo in campos_obrigatorios if campo not in dados]
+
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    for campo in ["username", "alvo", "conteudo"]:
+        if not isinstance(dados[campo], str) or not dados[campo].strip():
+            return jsonify({"erro": f"Valor inválido para {campo}"}), 422
+
+    if type(dados["nota"]) is not int or not 1 <= dados["nota"] <= 5:
+        return jsonify({"erro": "nota deve ser um inteiro entre 1 e 5"}), 422
+
+    if dados["alvo"] != username:
+        return jsonify({
+            "erro": "alvo deve corresponder ao usuário da URL"
+        }), 422
+
+    db = conectar_db()
+
+    usuario_alvo = db["tbl_testes"].find_one({"username": username})
+
+    if usuario_alvo is None:
+        return jsonify({"erro": "Usuário alvo não encontrado"}), 404
+
+    usuario_avaliador = db["tbl_testes"].find_one({"username": dados["username"]})
+
+    if usuario_avaliador is None:
+        return jsonify({"erro": "Usuário criador não encontrado"}), 404
+
+    avaliacao = {
+        campo: dados[campo]
+        for campo in campos_obrigatorios
+    }
+
+    db["tbl_avaliacoes"].insert_one(avaliacao)
+
+    return jsonify({"mensagem": "Avaliação feita com sucesso"}), 201
 
 if __name__ == '__main__':
     app.run(debug=True)
