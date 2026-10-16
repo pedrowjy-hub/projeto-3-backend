@@ -272,3 +272,70 @@ def test_editar_user_422_plataformas_invalidas():
 
     assert response.status_code == 422
     assert response.json == {"erro": "Valor inválido para plataformas"}
+
+def test_alterar_assinatura():
+    with patch('api.conectar_db') as conn:
+        colecao = conn.return_value.__getitem__.return_value
+
+        colecao.find_one.return_value = {
+            "username": "rafacelduds",
+            "assinatura": False
+        }
+        colecao.update_one.return_value.matched_count = 1
+
+        dados = {
+            "assinatura": True,
+            "expiracao_assinatura": "23-10-2027"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds/assinatura",
+            json=dados
+        )
+
+        assert response.status_code == 200
+        assert response.json == {"mensagem": "Assinatura atualizada com sucesso"}
+        colecao.find_one.assert_called_once_with(
+            {"username": "rafacelduds"}
+        )
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": dados}
+        )
+
+def test_alterar_assinatura_sem_expiracao_400():
+    with patch('api.conectar_db') as conn:
+        colecao = conn.return_value.__getitem__.return_value
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds/assinatura",
+            json={"assinatura": True}
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}
+        colecao.update_one.assert_not_called()
+
+def test_desativar_assinatura():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds",
+            "assinatura": True,
+            "expiracao_assinatura": "23-10-2027",
+        }
+        colecao.update_one.return_value.matched_count = 1
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds/assinatura",
+            json={"assinatura": False},
+        )
+
+        assert response.status_code == 200
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {
+                "$set": {"assinatura": False},
+                "$unset": {"expiracao_assinatura": ""},
+            },
+        )
