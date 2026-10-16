@@ -3,6 +3,7 @@ from functools import lru_cache
 from flask import Flask, jsonify, request
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
 app =  Flask(__name__)
@@ -136,6 +137,64 @@ def editar_user(username):
         return jsonify({"erro": "Usuário não encontrado"}), 404
 
     return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
+
+@app.route("/usuarios/<string:username>/assinatura", methods=['PATCH'])
+def alterar_assinatura(username):
+    dados = request.get_json(silent=True)
+
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    assinatura = dados.get("assinatura")
+
+    if not isinstance(assinatura, bool):
+        return jsonify({"erro": "assinatura deve ser um booleano"}), 400
+
+    if assinatura:
+        expiracao = dados.get("expiracao_assinatura")
+
+        if not expiracao:
+            return jsonify({"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}), 400
+
+        try:
+            datetime.strptime(expiracao, "%d-%m-%Y")
+        except (ValueError, TypeError):
+            return jsonify({
+                "erro": "expiracao_assinatura deve ser uma data válida no formato DD-MM-AAAA"
+            }), 400
+
+        atualizacao = {
+            "$set": {
+                "assinatura": True,
+                "expiracao_assinatura": expiracao,
+            }
+        }
+    else:
+        atualizacao = {
+            "$set": {"assinatura": False},
+            "$unset": {"expiracao_assinatura": ""},
+        }
+
+    colecao = conectar_db()["tbl_testes"]
+
+    usuario = colecao.find_one({"username": username})
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    resultado = colecao.update_one(
+        {"username": username},
+        atualizacao,
+    )
+
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    return jsonify({
+        "mensagem": "Assinatura atualizada com sucesso"
+    }), 200
+
+
+
 
 if __name__ == '__main__':
     app.run(debug=True)
