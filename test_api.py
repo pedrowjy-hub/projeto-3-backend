@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from api import app
-from bson import ObjectId
+import hashlib
 
 @pytest.fixture
 def client():
@@ -97,6 +97,7 @@ def test_listar_sem_dados(mock_conectar_db):
             "plataformas": ["TikTok", "Instagram"],
             "assinatura": True,
             "expiracao_assinatura": "23-10-2026",
+            "senha":"fhkjfjaskldasbf"
         },
         {
             "username": "moda_urbana",
@@ -106,7 +107,8 @@ def test_listar_sem_dados(mock_conectar_db):
             "tipo": "empresa",
             "nicho": "moda",
             "plataformas": ["Instagram", "TikTok"],
-            "assinatura": False
+            "assinatura": False,
+            "senha":"fhkjfjaskldasbf"
         },
     ],
     ids=["influenciador", "empresa"],
@@ -139,6 +141,7 @@ def test_criar_user_campos_obrigatorios_ausentes():
             "nicho",
             "plataformas",
             "assinatura",
+            "senha"
         ]
     
     campos_faltantes = [
@@ -166,6 +169,7 @@ def test_criar_user_username_ja_cadastrado(mock_conectar_db):
         "plataformas": ["TikTok"],
         "assinatura": True,
         "expiracao_assinatura": "23-10-2026",
+        "senha": "fhkjfjaskldasbf",
     }
 
     response = app.test_client().post("/usuarios", json=novo_user)
@@ -339,3 +343,161 @@ def test_desativar_assinatura():
                 "$unset": {"expiracao_assinatura": ""},
             },
         )
+@patch("api.conectar_db")
+def test_login_ok(mock_conectar_db):
+    senha = "senha_correta"
+    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = {
+        "username": "pedrow2",
+        "email": "pedro@email.com",
+        "senha": senha_hash
+    }
+
+    response = app.test_client().post(
+        "/login",
+        json={"identificador": "pedrow2", "senha": senha}
+    )
+
+    assert response.status_code == 200
+    assert response.json == {"mensagem":"Login realizado com sucesso"}
+    colecao.find_one.assert_called_once_with({
+        "$or": [
+            {"username": "pedrow2"},
+            {"email": "pedrow2"}
+        ]
+    })
+
+@patch("api.conectar_db")
+def test_login_ok_com_email(mock_conectar_db):
+    senha = "senha_correta"
+    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = {
+        "username": "pedro",
+        "email": "pedro@email.com",
+        "senha": senha_hash,
+    }
+
+    response = app.test_client().post(
+        "/login",
+        json={
+            "identificador": "pedro@email.com",
+            "senha": senha,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json == {"mensagem": "Login realizado com sucesso"}
+    colecao.find_one.assert_called_once_with({
+        "$or": [
+            {"username": "pedro@email.com"},
+            {"email": "pedro@email.com"},
+        ]
+    })
+
+@patch("api.conectar_db")
+def test_login_senha_incorreta(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = {
+        "username": "pedro",
+        "email": "pedro@email.com",
+        "senha": hashlib.sha256("senha_correta".encode("utf-8")).hexdigest(),
+    }
+
+    response = app.test_client().post(
+        "/login",
+        json={"identificador": "pedro", "senha": "senha_errada"},
+    )
+
+    assert response.status_code == 401
+    assert response.json == {"erro": "Credenciais inválidas"}
+    colecao.find_one.assert_called_once_with({
+        "$or": [
+            {"username": "pedro"},
+            {"email": "pedro"},
+        ]
+    })
+
+@patch("api.conectar_db")
+def test_login_usuario_ou_email_inexistente(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
+
+    response = app.test_client().post(
+        "/login",
+        json={
+            "identificador": "naoexiste@email.com",
+            "senha": "qualquer_senha",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json == {"erro": "Credenciais inválidas"}
+    colecao.find_one.assert_called_once_with({
+        "$or": [
+            {"username": "naoexiste@email.com"},
+            {"email": "naoexiste@email.com"},
+        ]
+    })
+
+def test_login_sem_identificador(client):
+    response = client.post("/login", json={"senha": "senha_correta"})
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_sem_senha(client):
+    response = client.post("/login", json={"identificador": "pedro"})
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_senha_vazia(client):
+    response = client.post(
+        "/login",
+        json={"identificador": "pedrow2", "senha": ""},
+    )
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_corpo_vazio(client):
+    response = client.post("/login", json={})
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_sem_json(client):
+    response = client.post("/login")
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_identificador_vazio(client):
+    response = client.post(
+        "/login",
+        json={"identificador": "   ", "senha": "senha_correta"},
+    )
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Identificador e senha são obrigatórios"
+    }
+
+def test_login_metodo_nao_permitido(client):
+    response = client.get("/login")
+
+    assert response.status_code == 405
