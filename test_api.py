@@ -691,3 +691,170 @@ def test_adicionar_arquivo_campos_obrigatorios_ausentes():
         "erro": "Campos obrigatórios ausentes",
         "campos_faltantes": ["url", "tipo"],
     }
+
+def test_adicionar_avaliacao_201():
+    with patch('api.conectar_db') as conn:
+        colecao = conn.return_value.__getitem__.return_value
+
+        colecao.find_one.return_value = {
+            "username": "testeuser"
+        }
+
+        payload = {
+            "username": "rafacelduds",
+            "alvo": "testeuser",
+            "nota": 5,
+            "conteudo": "Trata o trabalho com seriedade"
+        }
+
+        response = app.test_client().post("/usuarios/testeuser/avaliacoes", json=payload)
+
+        assert response.status_code == 201
+        assert response.json == {"mensagem": "Avaliação feita com sucesso"}
+        colecao.insert_one.assert_called_once_with(payload)
+
+@pytest.mark.parametrize("payload", [None, [], "texto", 5])
+def test_adicionar_avaliacao_json_invalido(payload):
+    with patch("api.conectar_db") as conn:
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json=payload,
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"erro": "JSON inválido"}
+        conn.assert_not_called()
+
+def test_adicionar_avaliacao_campos_ausentes():
+    with patch("api.conectar_db") as conn:
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json={"username": "rafacelduds"},
+        )
+
+        assert response.status_code == 400
+        assert response.json == {
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": ["alvo", "nota", "conteudo"],
+        }
+        conn.assert_not_called()
+
+@pytest.mark.parametrize("campo", ["username", "alvo", "conteudo"])
+@pytest.mark.parametrize("valor", ["", "   ", None, 123, [], {}])
+def test_adicionar_avaliacao_campo_invalido(campo, valor):
+    with patch("api.conectar_db") as conn:
+        payload = {
+            "username": "rafacelduds",
+            "alvo": "testeuser",
+            "nota": 5,
+            "conteudo": "Trata o trabalho com seriedade",
+        }
+        payload[campo] = valor
+
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json=payload,
+        )
+
+        assert response.status_code == 422
+        assert response.json == {
+            "erro": f"Valor inválido para {campo}"
+        }
+        conn.assert_not_called()
+
+@pytest.mark.parametrize(
+    "nota",
+    [0, 6, -1, 3.5, "5", None, True, False, [], {}],
+)
+def test_adicionar_avaliacao_nota_invalida(nota):
+    with patch("api.conectar_db") as conn:
+        payload = {
+            "username": "rafacelduds",
+            "alvo": "testeuser",
+            "nota": nota,
+            "conteudo": "Trata o trabalho com seriedade",
+        }
+
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json=payload,
+        )
+
+        assert response.status_code == 422
+        assert response.json == {
+            "erro": "nota deve ser um inteiro entre 1 e 5"
+        }
+        conn.assert_not_called()
+
+def test_adicionar_avaliacao_alvo_diferente_da_url():
+    with patch("api.conectar_db") as conn:
+        payload = {
+            "username": "rafacelduds",
+            "alvo": "outro_usuario",
+            "nota": 5,
+            "conteudo": "Trata o trabalho com seriedade",
+        }
+
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json=payload,
+        )
+
+        assert response.status_code == 422
+        assert response.json == {
+            "erro": "alvo deve corresponder ao usuário da URL"
+        }
+        conn.assert_not_called()
+
+def test_adicionar_avaliacao_usuario_inexistente():
+    with patch("api.conectar_db") as conn:
+        db = conn.return_value
+        usuarios = db["tbl_testes"]
+        avaliacoes = db["tbl_avaliacoes"]
+
+        usuarios.find_one.return_value = None
+
+        payload = {
+            "username": "rafacelduds",
+            "alvo": "testeuser",
+            "nota": 5,
+            "conteudo": "Trata o trabalho com seriedade",
+        }
+
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json=payload,
+        )
+
+        assert response.status_code == 404
+        assert response.json == {
+            "erro": "Usuário alvo não encontrado"
+        }
+        usuarios.find_one.assert_called_once_with(
+            {"username": "testeuser"}
+        )
+        avaliacoes.insert_one.assert_not_called()
+
+
+def test_adicionar_avaliacao_avaliador_inexistente():
+    with patch("api.conectar_db") as conn:
+        db = conn.return_value
+        usuarios = db["tbl_testes"]
+        usuarios.find_one.side_effect = [
+            {"username": "testeuser"},
+            None,
+        ]
+
+        response = app.test_client().post(
+            "/usuarios/testeuser/avaliacoes",
+            json={
+                "username": "rafacelduds",
+                "alvo": "testeuser",
+                "nota": 5,
+                "conteudo": "Trata o trabalho com seriedade",
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário criador não encontrado"}
+        db["tbl_avaliacoes"].insert_one.assert_not_called()
