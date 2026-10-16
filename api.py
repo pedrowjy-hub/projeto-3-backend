@@ -106,44 +106,70 @@ def criar_user():
         "usuario": novo_usuario["username"],
     }),201
 
-@app.route('/usuarios/<string:username>', methods=['PUT'])
+@app.route('/usuarios/<string:username>', methods=['PATCH'])
 def editar_user(username):
     dados = request.get_json(silent=True)
-    if not isinstance(dados, dict):
-        return jsonify({"erro": "JSON inválido"}), 400
 
-    campos_obrigatorios = ["nome", "email", "contato", "tipo", "nicho", "plataformas"]
-    campos_faltantes = [campo for campo in campos_obrigatorios if campo not in dados]
-    if campos_faltantes:
+    if not isinstance(dados, dict) or not dados:
+        return jsonify({"erro": "Envie ao menos um campo para editar"}), 400
+
+    campos_editaveis = {
+        "nome", "email", "contato", "tipo",
+        "nicho", "plataformas", "descricao",
+    }
+
+    campos_desconhecidos = set(dados) - campos_editaveis
+    if campos_desconhecidos:
         return jsonify({
-            "erro": "Campos obrigatórios ausentes",
-            "campos_faltantes": campos_faltantes,
+            "erro": "Campos não permitidos",
+            "campos": list(campos_desconhecidos),
         }), 400
 
     for campo in ["nome", "email", "contato", "tipo", "nicho"]:
-        if not isinstance(dados[campo], str) or not dados[campo].strip():
+        if campo in dados and (
+            not isinstance(dados[campo], str) or not dados[campo].strip()
+        ):
             return jsonify({"erro": f"Valor inválido para {campo}"}), 422
 
-    if not isinstance(dados["plataformas"], list) or not all(
-        isinstance(plataforma, str) and plataforma.strip()
-        for plataforma in dados["plataformas"]
-    ):
-        return jsonify({"erro": "Valor inválido para plataformas"}), 422
+    if "plataformas" in dados:
+        plataformas = dados["plataformas"]
+        if (
+            not isinstance(plataformas, list)
+            or not plataformas
+            or not all(
+                isinstance(plataforma, str) and plataforma.strip()
+                for plataforma in plataformas
+            )
+        ):
+            return jsonify({"erro": "Valor inválido para plataformas"}), 422
+
+    if "descricao" in dados and not isinstance(dados["descricao"], str):
+        return jsonify({"erro": "Valor inválido para descricao"}), 422
 
     colecao = conectar_db()["tbl_testes"]
-    usuario = colecao.find_one({"username": username})
-    if usuario is None:
+    if colecao.find_one({"username": username}) is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
 
     for campo in ["email", "contato"]:
-        conflito = colecao.find_one({campo: dados[campo], "username": {"$ne": username}})
-        if conflito is not None:
-            return jsonify({"erro": f"Conflito: {campo} já cadastrado"}), 409
+        if campo in dados:
+            conflito = colecao.find_one({
+                campo: dados[campo],
+                "username": {"$ne": username},
+            })
+            if conflito is not None:
+                return jsonify({"erro": f"Conflito: {campo} já cadastrado"}), 409
 
-    atualizacao = {campo: dados[campo] for campo in campos_obrigatorios}
-    resultado = colecao.update_one({"username": username}, {"$set": atualizacao})
-    if resultado.matched_count == 0:
-        return jsonify({"erro": "Usuário não encontrado"}), 404
+    atualizacao = {}
+    for campo, valor in dados.items():
+        if isinstance(valor, str):
+            atualizacao[campo] = valor.strip()
+        else:
+            atualizacao[campo] = valor
+
+    colecao.update_one(
+        {"username": username},
+        {"$set": atualizacao},
+    )
 
     return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
 
