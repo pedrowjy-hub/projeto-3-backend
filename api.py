@@ -442,5 +442,22 @@ def avaliar(username):
 
     return jsonify({"mensagem": "Avaliação feita com sucesso"}), 201
 
+@app.route("/admin", methods=['GET'])
+@jwt_required()
+def admin_panel():
+    current_user_id = get_jwt_identity()
+    user = conectar_db()["tbl_testes"].find_one(
+        {"username": current_user_id},
+        {"_id": 0},
+    )
+
+    if user is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+
+    if user.get("tipo") != "admin":
+        return jsonify({"erro": "Acesso negado"}), 403
+    
+    return jsonify({"mensagem": "Acesso concedido, bem-vindo chefe"}), 200
+
 if __name__ == '__main__':
     app.run(debug=True)
