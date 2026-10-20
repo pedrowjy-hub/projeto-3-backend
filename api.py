@@ -1,13 +1,21 @@
 import os
 from functools import lru_cache
 from flask import Flask, jsonify, request
+from flask_cors import CORS
+from flask_jwt_extended import (
+    JWTManager, create_access_token, jwt_required, get_jwt_identity
+)
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from datetime import datetime
-import hashlib
+from flask_bcrypt import Bcrypt
 
 load_dotenv()
 app =  Flask(__name__)
+CORS(app)
+bcrypt = Bcrypt(app)
+app.config['JWT_SECRET_KEY'] = os.getenv("JWT_SECRET_KEY")
+jwt = JWTManager(app)
 
 
 @lru_cache
@@ -86,7 +94,7 @@ def criar_user():
     if not isinstance(senha,str) or not senha:
         return jsonify({"erro": "Senha inválida"}),400
 
-    novo_usuario["senha"] = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+    novo_usuario["senha"] = bcrypt.generate_password_hash(senha).decode("utf-8")
 
     colecao = conectar_db()['tbl_testes']
     usuario_existente = colecao.find_one(
@@ -254,14 +262,12 @@ def login():
         ]
     })
 
-    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
-
-    if usuario is None or usuario.get("senha") != senha_hash:
+    if usuario is None or not bcrypt.check_password_hash(usuario.get("senha"),dados.get("senha")):
         return jsonify({"erro": "Credenciais inválidas"}),401
 
-    return jsonify(
-        {"mensagem": "Login realizado com sucesso"}
-    ),200
+    token = create_access_token(identity=usuario["username"],
+                                additional_claims={"email":usuario["email"]})
+    return jsonify(access_token = token),200
 
 
 def buscar_chat(id_influenciador, id_empresa):

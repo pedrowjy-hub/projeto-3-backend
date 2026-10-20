@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from api import app
-import hashlib
+from flask_jwt_extended import decode_token
+from api import app, bcrypt
 
 @pytest.fixture
 def client():
@@ -117,14 +117,6 @@ def test_listar_sem_dados(mock_conectar_db):
 def test_criar_user_ok(mock_conectar_db, novo_user):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
 
-
-    senha_hash = hashlib.sha256(
-        novo_user["senha"].encode("utf-8")
-    ).hexdigest()
-
-    usuario_esperado = novo_user.copy()
-    usuario_esperado["senha"] = senha_hash
-
     response = app.test_client().post("/usuarios", json=novo_user)
     
     assert response.status_code == 201
@@ -132,7 +124,13 @@ def test_criar_user_ok(mock_conectar_db, novo_user):
         "mensagem": "Usuário criado com sucesso",
         "usuario": novo_user["username"],
     }
-    colecao.insert_one.assert_called_once_with(usuario_esperado)
+    colecao.insert_one.assert_called_once()
+
+    usuario_salvo = colecao.insert_one.call_args.args[0]
+    for campo, valor in novo_user.items():
+        if campo != "senha":
+            assert usuario_salvo[campo] == valor
+    assert bcrypt.check_password_hash(usuario_salvo["senha"], novo_user["senha"])
 
 def test_criar_user_campos_obrigatorios_ausentes():
 
@@ -208,9 +206,7 @@ def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
     usuario_salvo = colecao.insert_one.call_args.args[0]
 
     assert usuario_salvo["senha"] != "minha_senha"
-    assert usuario_salvo["senha"] == hashlib.sha256(
-        "minha_senha".encode("utf-8")
-    ).hexdigest()
+    assert bcrypt.check_password_hash(usuario_salvo["senha"], "minha_senha")
 
 
 def test_editar_user_sucesso():
@@ -386,7 +382,7 @@ def test_desativar_assinatura():
 @patch("api.conectar_db")
 def test_login_ok(mock_conectar_db):
     senha = "senha_correta"
-    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+    senha_hash = bcrypt.generate_password_hash(senha).decode("utf-8")
 
     colecao = mock_conectar_db.return_value.__getitem__.return_value
     colecao.find_one.return_value = {
@@ -401,7 +397,11 @@ def test_login_ok(mock_conectar_db):
     )
 
     assert response.status_code == 200
-    assert response.json == {"mensagem":"Login realizado com sucesso"}
+    assert set(response.json) == {"access_token"}
+    with app.app_context():
+        dados_token = decode_token(response.json["access_token"])
+    assert dados_token["sub"] == "pedrow2"
+    assert dados_token["email"] == "pedro@email.com"
     colecao.find_one.assert_called_once_with({
         "$or": [
             {"username": "pedrow2"},
@@ -412,7 +412,7 @@ def test_login_ok(mock_conectar_db):
 @patch("api.conectar_db")
 def test_login_ok_com_email(mock_conectar_db):
     senha = "senha_correta"
-    senha_hash = hashlib.sha256(senha.encode("utf-8")).hexdigest()
+    senha_hash = bcrypt.generate_password_hash(senha).decode("utf-8")
 
     colecao = mock_conectar_db.return_value.__getitem__.return_value
     colecao.find_one.return_value = {
@@ -430,7 +430,11 @@ def test_login_ok_com_email(mock_conectar_db):
     )
 
     assert response.status_code == 200
-    assert response.json == {"mensagem": "Login realizado com sucesso"}
+    assert set(response.json) == {"access_token"}
+    with app.app_context():
+        dados_token = decode_token(response.json["access_token"])
+    assert dados_token["sub"] == "pedro"
+    assert dados_token["email"] == "pedro@email.com"
     colecao.find_one.assert_called_once_with({
         "$or": [
             {"username": "pedro@email.com"},
@@ -444,7 +448,7 @@ def test_login_senha_incorreta(mock_conectar_db):
     colecao.find_one.return_value = {
         "username": "pedro",
         "email": "pedro@email.com",
-        "senha": hashlib.sha256("senha_correta".encode("utf-8")).hexdigest(),
+        "senha": bcrypt.generate_password_hash("senha_correta").decode("utf-8"),
     }
 
     response = app.test_client().post(
