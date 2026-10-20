@@ -1,7 +1,97 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from flask_jwt_extended import decode_token
+from datetime import timedelta
+from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
+
+
+@pytest.fixture
+def token_admin(monkeypatch):
+    monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
+    with app.app_context():
+        return create_access_token(identity="testeadmin")
+
+
+def test_admin_acesso_permitido(client, token_admin):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "testeadmin", "tipo": "admin"
+        }
+
+        response = client.get(
+            "/admin", headers={"Authorization": f"Bearer {token_admin}"}
+        )
+
+        assert response.status_code == 200
+        assert response.json == {
+            "mensagem": "Acesso concedido, bem-vindo chefe"
+        }
+        conn.return_value.__getitem__.assert_called_once_with("tbl_testes")
+        colecao.find_one.assert_called_once_with(
+            {"username": "testeadmin"}, {"_id": 0}
+        )
+
+
+@pytest.mark.parametrize("tipo", ["empresa", "influenciador", None])
+def test_admin_acesso_negado(client, token_admin, tipo):
+    with patch("api.conectar_db") as conn:
+        usuario = {"username": "testeadmin"}
+        if tipo is not None:
+            usuario["tipo"] = tipo
+        conn.return_value.__getitem__.return_value.find_one.return_value = usuario
+
+        response = client.get(
+            "/admin", headers={"Authorization": f"Bearer {token_admin}"}
+        )
+
+        assert response.status_code == 403
+        assert response.json == {"erro": "Acesso negado"}
+
+
+def test_admin_usuario_inexistente(client, token_admin):
+    with patch("api.conectar_db") as conn:
+        conn.return_value.__getitem__.return_value.find_one.return_value = None
+
+        response = client.get(
+            "/admin", headers={"Authorization": f"Bearer {token_admin}"}
+        )
+
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário não encontrado"}
+
+
+def test_admin_sem_token(client):
+    with patch("api.conectar_db") as conn:
+        response = client.get("/admin")
+
+        assert response.status_code == 401
+        conn.assert_not_called()
+
+
+def test_admin_token_invalido(client, token_admin):
+    with patch("api.conectar_db") as conn:
+        response = client.get(
+            "/admin", headers={"Authorization": "Bearer token-invalido"}
+        )
+
+        assert response.status_code == 422
+        conn.assert_not_called()
+
+
+def test_admin_token_expirado(client, token_admin):
+    with app.app_context():
+        token = create_access_token(
+            identity="testeadmin", expires_delta=timedelta(minutes=-1)
+        )
+
+    with patch("api.conectar_db") as conn:
+        response = client.get(
+            "/admin", headers={"Authorization": f"Bearer {token}"}
+        )
+
+        assert response.status_code == 401
+        conn.assert_not_called()
 
 @pytest.fixture
 def client():
