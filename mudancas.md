@@ -1,5 +1,65 @@
 Para o modelo “admin” e “usuário normal” (influenciador ou empresa), eu aplicaria assim:
 
+## Autorização das rotas protegidas
+
+`@jwt_required()` resolve apenas a autenticação: confirma que a requisição
+possui um token válido e disponibiliza a identidade do usuário com
+`get_jwt_identity()`. Cada rota também deve aplicar a regra de autorização
+adequada. Neste projeto, a identidade do token é o `username`.
+
+Mantenha o papel de administrador no banco como fonte de verdade. Não confie
+apenas em uma claim do token para essa decisão, pois o usuário pode ter sido
+removido ou ter seu papel alterado depois da emissão do token.
+
+### Usuário dono do perfil ou administrador
+
+Use este decorador em operações sobre `/usuarios/<username>` que podem ser
+feitas pelo próprio titular ou por um administrador:
+
+```python
+from functools import wraps
+from flask import jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
+
+
+def proprio_usuario_ou_admin_required(func):
+    @wraps(func)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        username_logado = get_jwt_identity()
+        usuario_logado = conectar_db()["tbl_testes"].find_one(
+            {"username": username_logado},
+            {"_id": 0, "tipo": 1},
+        )
+
+        if usuario_logado is None:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+
+        username_alvo = kwargs["username"]
+        eh_admin = usuario_logado.get("tipo") == "admin"
+
+        if username_logado != username_alvo and not eh_admin:
+            return jsonify({"erro": "Acesso negado"}), 403
+
+        return func(*args, **kwargs)
+
+    return wrapper
+```
+
+Aplicar em `PATCH /usuarios/<username>` e `DELETE /usuarios/<username>`:
+
+```python
+@app.route("/usuarios/<string:username>", methods=["PATCH"])
+@proprio_usuario_ou_admin_required
+def editar_user(username):
+    ...
+```
+
+### Códigos de resposta
+
+- `401`: token ausente, inválido ou referente a usuário que não existe mais.
+- `403`: token válido, mas usuário sem permissão para aquela ação.
+
 | Rota | JWT | Regra adicional |
 |---|---:|---|
 | `POST /login` | Não | Pública; recebe credenciais e devolve token. |
@@ -8,7 +68,7 @@ Para o modelo “admin” e “usuário normal” (influenciador ou empresa), eu
 | `GET /usuarios/<username>` | Depende | Pública se for perfil público, com projeção de campos seguros. Se mostrar dados privados, somente o dono ou admin. |
 | `PATCH /usuarios/<username>` | Sim | Usuário normal altera apenas o próprio perfil; admin pode alterar outros. Usuário normal não pode mudar `tipo` para admin. |
 | `DELETE /usuarios/<username>` | Sim | Apenas o próprio usuário ou admin. |
-| `PATCH /usuarios/<username>/assinatura` | Sim | Admin, ou integração de pagamento autenticada. Um usuário não deve poder definir a própria assinatura como ativa. |
+| `PATCH /usuarios/<username>/assinatura` | Sim | Na simulação, apenas o próprio usuário pode alterar o estado. Em pagamento real, substituir por checkout, cancelamento e webhook. |
 | `POST /chats` | Sim | Identidade do token deve ser um dos dois participantes. |
 | `GET /chats/...` | Sim | Identidade do token deve pertencer à conversa. |
 | `POST .../mensagens` | Sim | Identidade deve ser participante; derive o remetente pelo token, não pelo JSON enviado. |
@@ -16,7 +76,31 @@ Para o modelo “admin” e “usuário normal” (influenciador ou empresa), eu
 | `POST /usuarios/<username>/avaliacoes` | Sim | Derive o avaliador pelo token; não aceite `username` como identidade confiável no corpo. |
 | `GET /admin` | Sim | Além do JWT, verificar no banco se `tipo == "admin"`. |
 
-O ponto-chave é: `@jwt_required()` só confirma que existe um token válido. Para as rotas acima, você também precisa comparar a identidade do token (`get_jwt_identity()`) com o usuário da URL, o participante do chat ou o papel de admin.
+### Assinatura e pagamento
+
+O decorador controla quem pode chamar uma rota; ele não processa nem confirma
+um pagamento. A atual `PATCH /usuarios/<username>/assinatura` funciona como
+uma simulação de plano: depois de protegida com
+`@jwt_required()` e uma comparação entre a identidade do token e o `username`
+da URL, o usuário consegue alterar somente a própria assinatura. Não inclua a
+exceção de administrador nessa rota se o administrador não tiver essa função
+de suporte no produto.
+
+Para uma assinatura paga real, o cliente nunca deve enviar diretamente
+`assinatura: true` ou `expiracao_assinatura`. O fluxo deve ser:
+
+```text
+usuário autenticado → backend cria checkout → pagamento confirmado
+→ webhook verificado do provedor → backend atualiza a assinatura
+```
+
+Nesse cenário, prefira estas rotas:
+
+| Rota | Regra |
+|---|---|
+| `POST /usuarios/me/assinatura/checkout` | Requer JWT e inicia o pagamento do usuário logado. |
+| `POST /usuarios/me/assinatura/cancelamento` | Requer JWT e permite cancelar apenas o próprio plano. |
+| `POST /webhooks/pagamentos` | Recebe e valida a assinatura do provedor; é a única rota que ativa, renova ou define a expiração. |
 
 Para desenvolvimento, eu deixaria algo como:
 
