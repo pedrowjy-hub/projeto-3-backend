@@ -1,5 +1,5 @@
 import os
-from functools import lru_cache
+from functools import lru_cache,wraps
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import (
@@ -28,14 +28,55 @@ def get_client():
 def conectar_db():
     return get_client()[os.getenv("MONGO_DB", "projeto3")]
 
+def usuario_ou_admin_required(func):
+
+    @wraps(func)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        username_logado = get_jwt_identity()
+        user_logado  = conectar_db()["tbl_testes"].find_one(
+            {"username":username_logado},
+            {"_id":0,"papel":1}
+        )
+
+        if user_logado is None:
+            return jsonify({"erro":"Usuário não encontrado"}),401
+
+        username_alvo = kwargs["username"]
+        eh_admin = user_logado.get("papel") == "admin"
+
+        if username_logado != username_alvo and not eh_admin:
+            return jsonify({"erro":"Acesso Negado"}),403
+
+        return func(*args,**kwargs)
+
+    return wrapper
+
+TIPO_PERFIL = {"empresa","influenciador"}
+CAMPOS_PUBLICOS = {
+    "_id":0,
+    "username":1,
+    "nome":1,
+    "tipo_perfil":1,
+    "nicho":1,
+    "plataformas":1,
+    "descricao":1,
+}
 
 @app.route('/usuarios',methods=['GET'])
 def lista_users():
+    tipo_perfil = request.args.get("tipo_perfil")
+
+    filtro = {"papel":"usuario"}
+
+    if tipo_perfil:
+        if tipo_perfil not in TIPO_PERFIL:
+            return jsonify({"erro":"tipo de perfil deve ser empresa ou influenciador"}),400
+
+        filtro["tipo_perfil"] = tipo_perfil
+
     usuarios = list(
-        conectar_db()['tbl_testes'].find(
-            {},
-            {"_id":0},
-        )
+        conectar_db()['tbl_testes'].find(filtro, CAMPOS_PUBLICOS)
     )
 
     return  jsonify(usuarios),200
@@ -43,8 +84,8 @@ def lista_users():
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
     usuario = conectar_db()["tbl_testes"].find_one(
-        {"username": username},
-        {"_id": 0},
+        {"username": username,"papel":"usuario"},
+        CAMPOS_PUBLICOS,
     )
 
     if usuario is None:
@@ -52,6 +93,7 @@ def buscar_user(username):
     return jsonify(usuario), 200
 
 @app.route('/usuarios/<string:username>', methods=['DELETE'])
+@usuario_ou_admin_required
 def delete_user(username):
     usuario = conectar_db()["tbl_testes"].delete_one(
         {"username": username},
@@ -61,20 +103,26 @@ def delete_user(username):
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
 
+
 @app.route("/usuarios",methods=['POST'])
 def criar_user():
 
     novo_usuario = request.get_json(silent=True) or {}
+
+    if not isinstance(novo_usuario,dict):
+        return jsonify({"erro":"JSON inválido"}),400
+
+    if "papel" in novo_usuario:
+        return jsonify({"erro":"Papel é definido pelo servidor"}),400
 
     campos_obrigatorios = [
             "nome",
             "username",
             "email",
             "contato",
-            "tipo",
+            "tipo_perfil",
             "nicho",
             "plataformas",
-            "assinatura",
             "senha"
         ]
 
@@ -89,6 +137,10 @@ def criar_user():
         "campos_faltantes": campos_faltantes
     }),400
 
+    tipo_perfil = novo_usuario["tipo_perfil"]
+    if not isinstance(tipo_perfil, str) or tipo_perfil not in TIPO_PERFIL:
+        return jsonify({"erro":"Tipo de perfil deve ser Influenciador ou Empresa"}),400
+
     senha = novo_usuario.get("senha")
 
     if not isinstance(senha,str) or not senha:
@@ -96,7 +148,18 @@ def criar_user():
 
     novo_usuario["senha"] = bcrypt.generate_password_hash(senha).decode("utf-8")
 
+    if (
+        not isinstance(novo_usuario["plataformas"], list)
+        or not novo_usuario["plataformas"]
+        or not all(
+            isinstance(plataforma, str) and plataforma.strip()
+            for plataforma in novo_usuario["plataformas"]
+        )
+    ):
+        return jsonify({"erro": "Plataformas inválidas"}), 400
+
     colecao = conectar_db()['tbl_testes']
+    
     usuario_existente = colecao.find_one(
         {"username":novo_usuario["username"]}
     )
@@ -105,7 +168,9 @@ def criar_user():
         return jsonify(
             {"erro": "Conflito: username já cadastrado"}
         ),409
-
+    
+    novo_usuario["papel"]="usuario"
+    
     colecao.insert_one(novo_usuario)
 
     return jsonify(
@@ -115,6 +180,7 @@ def criar_user():
     }),201
 
 @app.route('/usuarios/<string:username>', methods=['PATCH'])
+@usuario_ou_admin_required
 def editar_user(username):
     dados = request.get_json(silent=True)
 
@@ -122,9 +188,12 @@ def editar_user(username):
         return jsonify({"erro": "Envie ao menos um campo para editar"}), 400
 
     campos_editaveis = {
-        "nome", "email", "contato", "tipo",
+        "nome", "email", "contato", "tipo_perfil",
         "nicho", "plataformas", "descricao",
     }
+
+    if "papel" in dados:
+        return jsonify({"erro":"Papel não pode ser alterado"}),400
 
     campos_desconhecidos = set(dados) - campos_editaveis
     if campos_desconhecidos:
@@ -133,7 +202,7 @@ def editar_user(username):
             "campos": list(campos_desconhecidos),
         }), 400
 
-    for campo in ["nome", "email", "contato", "tipo", "nicho"]:
+    for campo in ["nome", "email", "contato", "tipo_perfil", "nicho"]:
         if campo in dados and (
             not isinstance(dados[campo], str) or not dados[campo].strip()
         ):
@@ -153,6 +222,9 @@ def editar_user(username):
 
     if "descricao" in dados and not isinstance(dados["descricao"], str):
         return jsonify({"erro": "Valor inválido para descricao"}), 422
+
+    if ("tipo_perfil" in dados and dados["tipo_perfil"] not in TIPO_PERFIL):
+        return jsonify({"erro":"Tipo de perfil deve ser empresa ou influenciador"}),422
 
     colecao = conectar_db()["tbl_testes"]
     if colecao.find_one({"username": username}) is None:
@@ -182,7 +254,13 @@ def editar_user(username):
     return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
 
 @app.route("/usuarios/<string:username>/assinatura", methods=['PATCH'])
+@jwt_required()
 def alterar_assinatura(username):
+    username_logado = get_jwt_identity()
+
+    if username_logado != username:
+        return jsonify({"erro":"Acesso Negado"}),403
+        
     dados = request.get_json(silent=True)
 
     if not isinstance(dados, dict):
@@ -269,6 +347,20 @@ def login():
                                 additional_claims={"email":usuario["email"]})
     return jsonify(access_token = token),200
 
+def obter_usuario_participante(id_influenciador, id_empresa):
+    username_logado = get_jwt_identity()
+    usuario_logado = conectar_db()["tbl_testes"].find_one(
+        {"username": username_logado},
+        {"_id": 0, "username": 1},
+    )
+
+    if usuario_logado is None:
+        return None, (jsonify({"erro": "Usuário não encontrado"}), 401)
+
+    if username_logado not in {id_influenciador, id_empresa}:
+        return None, (jsonify({"erro": "Acesso Negado"}), 403)
+
+    return username_logado, None
 
 def buscar_chat(id_influenciador, id_empresa):
     return conectar_db()["chats"].find_one(
@@ -281,6 +373,7 @@ def buscar_chat(id_influenciador, id_empresa):
 
 
 @app.route("/chats", methods=["POST"])
+@jwt_required()
 def criar_chat():
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
@@ -302,6 +395,12 @@ def criar_chat():
     ):
         return jsonify({"erro": "IDs dos usuários inválidos"}), 422
 
+    _, erro = obter_usuario_participante(
+        dados["id_influenciador"], dados["id_empresa"]
+    )
+    if erro:
+        return erro
+
     colecao = conectar_db()["chats"]
     filtro = {
         "id_influenciador": dados["id_influenciador"],
@@ -316,7 +415,12 @@ def criar_chat():
 
 
 @app.route("/chats/<string:id_influenciador>/<string:id_empresa>", methods=["GET"])
+@jwt_required()
 def buscar_chat_por_usuarios(id_influenciador, id_empresa):
+    _, erro = obter_usuario_participante(id_influenciador, id_empresa)
+    if erro:
+        return erro
+    
     chat = buscar_chat(id_influenciador, id_empresa)
     if chat is None:
         return jsonify({"erro": "Chat não encontrado"}), 404
@@ -324,35 +428,33 @@ def buscar_chat_por_usuarios(id_influenciador, id_empresa):
 
 
 @app.route("/chats/<string:id_influenciador>/<string:id_empresa>/mensagens", methods=["POST"])
+@jwt_required()
 def enviar_mensagem(id_influenciador, id_empresa):
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
         return jsonify({"erro": "JSON inválido"}), 400
 
-    campos_obrigatorios = ["remetente_id", "mensagem"]
-    campos_faltantes = [
-        campo for campo in campos_obrigatorios if campo not in dados
-    ]
-    if campos_faltantes:
-        return jsonify({
-            "erro": "Campos obrigatórios ausentes",
-            "campos_faltantes": campos_faltantes,
-        }), 400
+    if not isinstance(dados.get("mensagem"),str) or not dados["mensagem"].strip():
+        return jsonify({"erro":"Mensagem inválida"}),422
 
-    if (
-        dados["remetente_id"] not in {id_influenciador, id_empresa}
-        or not isinstance(dados["mensagem"], str)
-        or not dados["mensagem"].strip()
-    ):
-        return jsonify({"erro": "Mensagem inválida"}), 422
+    username_logado, erro = obter_usuario_participante(
+        id_influenciador, id_empresa
+    )
+    if erro:
+        return erro
 
+    mensagem = {
+        "remetente_id": username_logado,
+        "mensagem": dados["mensagem"],
+    }
+    
     filtro = {
         "id_influenciador": id_influenciador,
         "id_empresa": id_empresa,
     }
     resultado = conectar_db()["chats"].update_one(
         filtro,
-        {"$push": {"conversa": dados}},
+        {"$push": {"conversa": mensagem}},
     )
     if resultado.matched_count == 0:
         return jsonify({"erro": "Chat não encontrado"}), 404
@@ -360,6 +462,7 @@ def enviar_mensagem(id_influenciador, id_empresa):
 
 
 @app.route("/chats/<string:id_influenciador>/<string:id_empresa>/arquivos", methods=["POST"])
+@jwt_required()
 def adicionar_arquivo(id_influenciador, id_empresa):
     dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
@@ -380,6 +483,10 @@ def adicionar_arquivo(id_influenciador, id_empresa):
         for campo in campos_obrigatorios
     ):
         return jsonify({"erro": "Arquivo inválido"}), 422
+
+    _, erro = obter_usuario_participante(id_influenciador, id_empresa)
+    if erro:
+        return erro
 
     filtro = {
         "id_influenciador": id_influenciador,
@@ -454,7 +561,7 @@ def admin_panel():
     if user is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
 
-    if user.get("tipo") != "admin":
+    if user.get("papel") != "admin":
         return jsonify({"erro": "Acesso negado"}), 403
     
     return jsonify({"mensagem": "Acesso concedido, bem-vindo chefe"}), 200

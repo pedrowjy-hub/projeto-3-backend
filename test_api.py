@@ -4,6 +4,16 @@ from datetime import timedelta
 from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
 
+PROJECAO_PUBLICA = {
+    "_id": 0,
+    "username": 1,
+    "nome": 1,
+    "tipo_perfil": 1,
+    "nicho": 1,
+    "plataformas": 1,
+    "descricao": 1,
+}
+
 
 @pytest.fixture
 def token_admin(monkeypatch):
@@ -12,11 +22,36 @@ def token_admin(monkeypatch):
         return create_access_token(identity="testeadmin")
 
 
+@pytest.fixture
+def token_usuario(monkeypatch):
+    monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
+    with app.app_context():
+        return create_access_token(identity="rafacelduds")
+
+
+@pytest.fixture
+def token_outro_usuario(monkeypatch):
+    monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
+    with app.app_context():
+        return create_access_token(identity="outro_usuario")
+
+
+@pytest.fixture
+def token_influenciador(monkeypatch):
+    monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
+    with app.app_context():
+        return create_access_token(identity="influenciador_1")
+
+
+def cabecalho_autorizacao(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_admin_acesso_permitido(client, token_admin):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = {
-            "username": "testeadmin", "tipo": "admin"
+            "username": "testeadmin", "papel": "admin"
         }
 
         response = client.get(
@@ -33,12 +68,12 @@ def test_admin_acesso_permitido(client, token_admin):
         )
 
 
-@pytest.mark.parametrize("tipo", ["empresa", "influenciador", None])
-def test_admin_acesso_negado(client, token_admin, tipo):
+@pytest.mark.parametrize("papel", ["usuario", None])
+def test_admin_acesso_negado(client, token_admin, papel):
     with patch("api.conectar_db") as conn:
         usuario = {"username": "testeadmin"}
-        if tipo is not None:
-            usuario["tipo"] = tipo
+        if papel is not None:
+            usuario["papel"] = papel
         conn.return_value.__getitem__.return_value.find_one.return_value = usuario
 
         response = client.get(
@@ -102,15 +137,23 @@ def client():
 def test_buscar_user():
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.return_value = {"username": "rafacelduds", "email": "rafaelfd5@al.insper.edu.br"}
+        usuario_publico = {
+            "username": "rafacelduds",
+            "nome": "Rafael",
+            "tipo_perfil": "influenciador",
+            "nicho": "moda",
+            "plataformas": ["Instagram"],
+            "descricao": "Criador de conteúdo",
+        }
+        colecao.find_one.return_value = usuario_publico
 
         response = app.test_client().get("/usuarios/rafacelduds")
 
         assert response.status_code == 200
-        assert response.json == {"username": "rafacelduds", "email": "rafaelfd5@al.insper.edu.br"}
+        assert response.json == usuario_publico
         colecao.find_one.assert_called_once_with(
-            {"username": "rafacelduds"},
-            {"_id": 0},
+            {"username": "rafacelduds", "papel": "usuario"},
+            PROJECAO_PUBLICA,
         )
         
 def test_buscar_user_404():
@@ -123,26 +166,66 @@ def test_buscar_user_404():
         assert response.status_code == 404
         colecao.find_one.assert_called_once()
 
-def test_deletar_user():
+def test_deletar_user(token_usuario):
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
         colecao.delete_one.return_value.deleted_count = 1
 
-        response = app.test_client().delete("/usuarios/rafacelduds")
+        response = app.test_client().delete(
+            "/usuarios/rafacelduds",
+            headers=cabecalho_autorizacao(token_usuario),
+        )
         assert response.status_code == 204
+        colecao.find_one.assert_called_once_with(
+            {"username": "rafacelduds"}, {"_id": 0, "papel": 1}
+        )
         colecao.delete_one.assert_called_once_with(
             {"username": "rafacelduds"}
         )
 
-def test_deletar_user_404():
+def test_deletar_user_404(token_admin):
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "testeadmin", "papel": "admin"
+        }
         colecao.delete_one.return_value.deleted_count = 0
 
-        response = app.test_client().delete("/usuarios/fulano")
+        response = app.test_client().delete(
+            "/usuarios/fulano",
+            headers=cabecalho_autorizacao(token_admin),
+        )
 
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário não encontrado"}
+
+
+def test_deletar_user_sem_token():
+    with patch('api.conectar_db') as conn:
+        response = app.test_client().delete("/usuarios/rafacelduds")
+
+        assert response.status_code == 401
+        conn.assert_not_called()
+
+
+def test_deletar_user_de_outro_usuario_e_negado(token_outro_usuario):
+    with patch('api.conectar_db') as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "outro_usuario", "papel": "usuario"
+        }
+
+        response = app.test_client().delete(
+            "/usuarios/rafacelduds",
+            headers=cabecalho_autorizacao(token_outro_usuario),
+        )
+
+        assert response.status_code == 403
+        assert response.json == {"erro": "Acesso Negado"}
+        colecao.delete_one.assert_not_called()
         
 @patch("api.conectar_db")
 def test_listar_dados_ok(mock_conectar_db):
@@ -150,10 +233,14 @@ def test_listar_dados_ok(mock_conectar_db):
     mock_db = mock_conectar_db.return_value
     mock_collection = mock_db.__getitem__.return_value
 
-    usuarios = [
-        {"username":"pedrow2","nome":"Pedro","email":"email@email.com","contato":"(11)99999-9999","tipo":"influenciador","nicho":"moda","plataformas":["Tiktok","Instagram"],"assinatura":True,"expiracao_assinatura":"23-10-2026"},
-        {"username":"teste","nome":"teste","email":"teste@email.com","contato":"(11)99999-9999","tipo":"admin","nicho":"moda","plataformas":["Tiktok"],"assinatura":False,"expiracao_assinatura":"-"}
-    ]
+    usuarios = [{
+        "username": "pedrow2",
+        "nome": "Pedro",
+        "tipo_perfil": "influenciador",
+        "nicho": "moda",
+        "plataformas": ["TikTok", "Instagram"],
+        "descricao": "Criador de conteúdo",
+    }]
 
     mock_collection.find.return_value = usuarios
 
@@ -161,7 +248,9 @@ def test_listar_dados_ok(mock_conectar_db):
 
     assert response.status_code == 200
     assert response.get_json() == usuarios
-    mock_collection.find.assert_called_once_with({},{"_id":0})
+    mock_collection.find.assert_called_once_with(
+        {"papel": "usuario"}, PROJECAO_PUBLICA
+    )
 
 @patch("api.conectar_db")
 def test_listar_sem_dados(mock_conectar_db):
@@ -172,7 +261,34 @@ def test_listar_sem_dados(mock_conectar_db):
 
     assert response.status_code == 200
     assert response.get_json() == []
-    colecao.find.assert_called_once_with({}, {"_id": 0})
+    colecao.find.assert_called_once_with(
+        {"papel": "usuario"}, PROJECAO_PUBLICA
+    )
+
+
+@patch("api.conectar_db")
+def test_listar_filtra_por_tipo_perfil(mock_conectar_db):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find.return_value = []
+
+    response = app.test_client().get("/usuarios?tipo_perfil=empresa")
+
+    assert response.status_code == 200
+    colecao.find.assert_called_once_with(
+        {"papel": "usuario", "tipo_perfil": "empresa"},
+        PROJECAO_PUBLICA,
+    )
+
+
+@patch("api.conectar_db")
+def test_listar_rejeita_tipo_perfil_invalido(mock_conectar_db):
+    response = app.test_client().get("/usuarios?tipo_perfil=admin")
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "tipo de perfil deve ser empresa ou influenciador"
+    }
+    mock_conectar_db.assert_not_called()
 
 @pytest.mark.parametrize(
     "novo_user",
@@ -182,11 +298,9 @@ def test_listar_sem_dados(mock_conectar_db):
             "nome": "Pedro",
             "email": "pedro@email.com",
             "contato": "(11)99999-9999",
-            "tipo": "influenciador",
+            "tipo_perfil": "influenciador",
             "nicho": "moda",
             "plataformas": ["TikTok", "Instagram"],
-            "assinatura": True,
-            "expiracao_assinatura": "23-10-2026",
             "senha":"fhkjfjaskldasbf"
         },
         {
@@ -194,10 +308,9 @@ def test_listar_sem_dados(mock_conectar_db):
             "nome": "Moda Urbana",
             "email": "contato@modaurbana.com",
             "contato": "(11)98888-8888",
-            "tipo": "empresa",
+            "tipo_perfil": "empresa",
             "nicho": "moda",
             "plataformas": ["Instagram", "TikTok"],
-            "assinatura": False,
             "senha":"fhkjfjaskldasbf"
         },
     ],
@@ -221,6 +334,7 @@ def test_criar_user_ok(mock_conectar_db, novo_user):
         if campo != "senha":
             assert usuario_salvo[campo] == valor
     assert bcrypt.check_password_hash(usuario_salvo["senha"], novo_user["senha"])
+    assert usuario_salvo["papel"] == "usuario"
 
 def test_criar_user_campos_obrigatorios_ausentes():
 
@@ -233,10 +347,9 @@ def test_criar_user_campos_obrigatorios_ausentes():
     campos_obrigatorios = [
             "email",
             "contato",
-            "tipo",
+            "tipo_perfil",
             "nicho",
             "plataformas",
-            "assinatura",
             "senha"
         ]
     
@@ -260,11 +373,9 @@ def test_criar_user_username_ja_cadastrado(mock_conectar_db):
         "nome": "Pedro",
         "email": "pedro@email.com",
         "contato": "(11)99999-9999",
-        "tipo": "influenciador",
+        "tipo_perfil": "influenciador",
         "nicho": "moda",
         "plataformas": ["TikTok"],
-        "assinatura": True,
-        "expiracao_assinatura": "23-10-2026",
         "senha": "fhkjfjaskldasbf",
     }
 
@@ -284,10 +395,9 @@ def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
         "nome": "Pedro",
         "email": "pedro@email.com",
         "contato": "(11)99999-9999",
-        "tipo": "influenciador",
+        "tipo_perfil": "influenciador",
         "nicho": "moda",
         "plataformas": ["TikTok"],
-        "assinatura": False,
         "senha": "minha_senha",
     }
 
@@ -297,15 +407,56 @@ def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
 
     assert usuario_salvo["senha"] != "minha_senha"
     assert bcrypt.check_password_hash(usuario_salvo["senha"], "minha_senha")
+    assert usuario_salvo["papel"] == "usuario"
 
 
-def test_editar_user_sucesso():
+@patch("api.conectar_db")
+def test_criar_user_rejeita_papel_enviado_pelo_cliente(mock_conectar_db):
+    response = app.test_client().post(
+        "/usuarios",
+        json={"papel": "admin"},
+    )
+
+    assert response.status_code == 400
+    assert response.json == {"erro": "Papel é definido pelo servidor"}
+    mock_conectar_db.assert_not_called()
+
+
+@patch("api.conectar_db")
+def test_criar_user_rejeita_tipo_perfil_invalido(mock_conectar_db):
+    payload = {
+        "username": "pedrow2",
+        "nome": "Pedro",
+        "email": "pedro@email.com",
+        "contato": "(11)99999-9999",
+        "tipo_perfil": [],
+        "nicho": "moda",
+        "plataformas": ["TikTok"],
+        "senha": "minha_senha",
+    }
+
+    response = app.test_client().post("/usuarios", json=payload)
+
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Tipo de perfil deve ser Influenciador ou Empresa"
+    }
+    mock_conectar_db.assert_not_called()
+
+
+def test_editar_user_sucesso(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.return_value = {"username": "rafacelduds"}
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
         dados = {"nome": "Rafael"}
 
-        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
         assert response.status_code == 200
         assert response.json == {"mensagem": "Usuário atualizado com sucesso"}
@@ -315,15 +466,21 @@ def test_editar_user_sucesso():
         )
 
 
-def test_editar_user_com_descricao():
+def test_editar_user_com_descricao(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         dados = {
             "descricao": "Criador de conteúdo sobre moda e estilo.",
         }
-        colecao.find_one.return_value = {"username": "rafacelduds"}
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
 
-        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
         assert response.status_code == 200
         colecao.update_one.assert_called_once_with(
@@ -332,13 +489,19 @@ def test_editar_user_com_descricao():
         )
 
 
-def test_editar_user_permite_descricao_vazia():
+def test_editar_user_permite_descricao_vazia(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.return_value = {"username": "rafacelduds"}
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
         dados = {"descricao": ""}
 
-        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
         assert response.status_code == 200
         colecao.update_one.assert_called_once_with(
@@ -347,63 +510,207 @@ def test_editar_user_permite_descricao_vazia():
         )
 
 
-def test_editar_user_404():
+def test_editar_user_404(token_admin):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.return_value = None
+        colecao.find_one.side_effect = [
+            {"username": "testeadmin", "papel": "admin"},
+            None,
+        ]
         dados = {"descricao": "Uma descrição"}
 
-        response = app.test_client().patch("/usuarios/fulano", json=dados)
+        response = app.test_client().patch(
+            "/usuarios/fulano",
+            json=dados,
+            headers=cabecalho_autorizacao(token_admin),
+        )
 
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário não encontrado"}
         colecao.update_one.assert_not_called()
 
 
-def test_editar_user_400_sem_campos():
+def test_editar_user_400_sem_campos(token_usuario):
     dados = {}
 
-    response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
     assert response.status_code == 400
     assert response.json == {"erro": "Envie ao menos um campo para editar"}
 
 
-def test_editar_user_422_campo_essencial_vazio():
-    response = app.test_client().patch(
-        "/usuarios/rafacelduds",
-        json={"nome": ""},
-    )
+def test_editar_user_422_campo_essencial_vazio(token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"nome": ""},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
     assert response.status_code == 422
     assert response.json == {"erro": "Valor inválido para nome"}
 
 
-def test_editar_user_409_email_em_uso():
+def test_editar_user_409_email_em_uso(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.side_effect = [
+            {"username": "rafacelduds", "papel": "usuario"},
             {"username": "rafacelduds"},
             {"username": "outro_usuario"},
         ]
         dados = {"email": "usado@example.com"}
 
-        response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
         assert response.status_code == 409
         assert response.json == {"erro": "Conflito: email já cadastrado"}
         colecao.update_one.assert_not_called()
 
 
-def test_editar_user_422_plataformas_invalidas():
+def test_editar_user_422_plataformas_invalidas(token_usuario):
     dados = {"plataformas": []}
 
-    response = app.test_client().patch("/usuarios/rafacelduds", json=dados)
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
+        )
 
     assert response.status_code == 422
     assert response.json == {"erro": "Valor inválido para plataformas"}
 
-def test_alterar_assinatura():
+
+def test_editar_user_bloqueia_papel(token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"papel": "admin"},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"erro": "Papel não pode ser alterado"}
+        colecao.update_one.assert_not_called()
+
+
+def test_editar_user_atualiza_tipo_perfil(token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"tipo_perfil": "empresa"},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 200
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": {"tipo_perfil": "empresa"}},
+        )
+
+
+def test_editar_user_rejeita_tipo_perfil_invalido(token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"tipo_perfil": "admin"},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 422
+        assert response.json == {
+            "erro": "Tipo de perfil deve ser empresa ou influenciador"
+        }
+        colecao.update_one.assert_not_called()
+
+
+def test_editar_user_sem_token():
+    with patch("api.conectar_db") as conn:
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds", json={"nome": "Rafael"}
+        )
+
+        assert response.status_code == 401
+        conn.assert_not_called()
+
+
+def test_editar_user_de_outro_usuario_e_negado(token_outro_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "outro_usuario", "papel": "usuario"
+        }
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"nome": "Rafael"},
+            headers=cabecalho_autorizacao(token_outro_usuario),
+        )
+
+        assert response.status_code == 403
+        assert response.json == {"erro": "Acesso Negado"}
+        colecao.update_one.assert_not_called()
+
+
+def test_editar_user_por_admin(token_admin):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [
+            {"username": "testeadmin", "papel": "admin"},
+            {"username": "rafacelduds"},
+        ]
+
+        response = app.test_client().patch(
+            "/usuarios/rafacelduds",
+            json={"nome": "Rafael"},
+            headers=cabecalho_autorizacao(token_admin),
+        )
+
+        assert response.status_code == 200
+        colecao.update_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {"$set": {"nome": "Rafael"}},
+        )
+
+def test_alterar_assinatura(token_usuario):
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
 
@@ -420,7 +727,8 @@ def test_alterar_assinatura():
 
         response = app.test_client().patch(
             "/usuarios/rafacelduds/assinatura",
-            json=dados
+            json=dados,
+            headers=cabecalho_autorizacao(token_usuario),
         )
 
         assert response.status_code == 200
@@ -433,20 +741,21 @@ def test_alterar_assinatura():
             {"$set": dados}
         )
 
-def test_alterar_assinatura_sem_expiracao_400():
+def test_alterar_assinatura_sem_expiracao_400(token_usuario):
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
 
         response = app.test_client().patch(
             "/usuarios/rafacelduds/assinatura",
-            json={"assinatura": True}
+            json={"assinatura": True},
+            headers=cabecalho_autorizacao(token_usuario),
         )
 
         assert response.status_code == 400
         assert response.json == {"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}
         colecao.update_one.assert_not_called()
 
-def test_desativar_assinatura():
+def test_desativar_assinatura(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = {
@@ -459,6 +768,7 @@ def test_desativar_assinatura():
         response = app.test_client().patch(
             "/usuarios/rafacelduds/assinatura",
             json={"assinatura": False},
+            headers=cabecalho_autorizacao(token_usuario),
         )
 
         assert response.status_code == 200
@@ -632,16 +942,22 @@ def test_login_identificador_vazio(client):
     }
 
 
+CHAT_URL = "/chats/influenciador_1/empresa_1"
+CHAT_PARTICIPANTE = {"username": "influenciador_1"}
+
+
 @patch("api.conectar_db")
-def test_criar_chat_ok(mock_conectar_db):
+def test_criar_chat_ok(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
-    colecao.find_one.return_value = None
+    colecao.find_one.side_effect = [CHAT_PARTICIPANTE, None]
     payload = {
         "id_influenciador": "influenciador_1",
         "id_empresa": "empresa_1",
     }
 
-    response = app.test_client().post("/chats", json=payload)
+    response = app.test_client().post(
+        "/chats", json=payload, headers=cabecalho_autorizacao(token_influenciador)
+    )
 
     chat_esperado = {**payload, "conversa": [], "arquivos": []}
     assert response.status_code == 201
@@ -649,14 +965,14 @@ def test_criar_chat_ok(mock_conectar_db):
         "mensagem": "Chat criado com sucesso",
         "chat": chat_esperado,
     }
-    colecao.find_one.assert_called_once_with(payload)
     colecao.insert_one.assert_called_once_with(chat_esperado)
 
 
-def test_criar_chat_campos_obrigatorios_ausentes():
+def test_criar_chat_campos_obrigatorios_ausentes(token_influenciador):
     response = app.test_client().post(
         "/chats",
         json={"id_influenciador": "influenciador_1"},
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
     assert response.status_code == 400
@@ -667,15 +983,17 @@ def test_criar_chat_campos_obrigatorios_ausentes():
 
 
 @patch("api.conectar_db")
-def test_criar_chat_duplicado(mock_conectar_db):
+def test_criar_chat_duplicado(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
     payload = {
         "id_influenciador": "influenciador_1",
         "id_empresa": "empresa_1",
     }
-    colecao.find_one.return_value = payload
+    colecao.find_one.side_effect = [CHAT_PARTICIPANTE, payload]
 
-    response = app.test_client().post("/chats", json=payload)
+    response = app.test_client().post(
+        "/chats", json=payload, headers=cabecalho_autorizacao(token_influenciador)
+    )
 
     assert response.status_code == 409
     assert response.get_json() == {"erro": "Chat já existe"}
@@ -683,7 +1001,7 @@ def test_criar_chat_duplicado(mock_conectar_db):
 
 
 @patch("api.conectar_db")
-def test_buscar_chat_ok(mock_conectar_db):
+def test_buscar_chat_ok(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
     chat = {
         "id_influenciador": "influenciador_1",
@@ -691,40 +1009,43 @@ def test_buscar_chat_ok(mock_conectar_db):
         "conversa": [],
         "arquivos": [],
     }
-    colecao.find_one.return_value = chat
+    colecao.find_one.side_effect = [CHAT_PARTICIPANTE, chat]
 
-    response = app.test_client().get("/chats/influenciador_1/empresa_1")
+    response = app.test_client().get(
+        CHAT_URL, headers=cabecalho_autorizacao(token_influenciador)
+    )
 
     assert response.status_code == 200
     assert response.get_json() == chat
-    colecao.find_one.assert_called_once_with(
-        {"id_influenciador": "influenciador_1", "id_empresa": "empresa_1"},
-        {"_id": 0},
-    )
 
 
 @patch("api.conectar_db")
-def test_buscar_chat_404(mock_conectar_db):
+def test_buscar_chat_404(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
-    colecao.find_one.return_value = None
+    colecao.find_one.side_effect = [CHAT_PARTICIPANTE, None]
 
-    response = app.test_client().get("/chats/influenciador_1/empresa_1")
+    response = app.test_client().get(
+        CHAT_URL, headers=cabecalho_autorizacao(token_influenciador)
+    )
 
     assert response.status_code == 404
     assert response.get_json() == {"erro": "Chat não encontrado"}
 
 
 @patch("api.conectar_db")
-def test_enviar_mensagem_ok(mock_conectar_db):
+def test_enviar_mensagem_ok(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = CHAT_PARTICIPANTE
     colecao.update_one.return_value.matched_count = 1
-    mensagem = {"remetente_id": "influenciador_1", "mensagem": "Olá!"}
+    dados = {"remetente_id": "terceiro", "mensagem": "Olá!"}
 
     response = app.test_client().post(
-        "/chats/influenciador_1/empresa_1/mensagens",
-        json=mensagem,
+        f"{CHAT_URL}/mensagens",
+        json=dados,
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
+    mensagem = {"remetente_id": "influenciador_1", "mensagem": "Olá!"}
     assert response.status_code == 201
     assert response.get_json() == {"mensagem": "Mensagem enviada com sucesso"}
     colecao.update_one.assert_called_once_with(
@@ -732,11 +1053,11 @@ def test_enviar_mensagem_ok(mock_conectar_db):
         {"$push": {"conversa": mensagem}},
     )
 
-
-def test_enviar_mensagem_remetente_invalido():
+def test_enviar_mensagem_invalida(token_influenciador):
     response = app.test_client().post(
-        "/chats/influenciador_1/empresa_1/mensagens",
-        json={"remetente_id": "terceiro", "mensagem": "Olá!"},
+        f"{CHAT_URL}/mensagens",
+        json={"mensagem": ""},
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
     assert response.status_code == 422
@@ -744,13 +1065,15 @@ def test_enviar_mensagem_remetente_invalido():
 
 
 @patch("api.conectar_db")
-def test_enviar_mensagem_chat_inexistente(mock_conectar_db):
+def test_enviar_mensagem_chat_inexistente(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = CHAT_PARTICIPANTE
     colecao.update_one.return_value.matched_count = 0
 
     response = app.test_client().post(
-        "/chats/influenciador_1/empresa_1/mensagens",
-        json={"remetente_id": "empresa_1", "mensagem": "Olá!"},
+        f"{CHAT_URL}/mensagens",
+        json={"mensagem": "Olá!"},
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
     assert response.status_code == 404
@@ -758,8 +1081,9 @@ def test_enviar_mensagem_chat_inexistente(mock_conectar_db):
 
 
 @patch("api.conectar_db")
-def test_adicionar_arquivo_ok(mock_conectar_db):
+def test_adicionar_arquivo_ok(mock_conectar_db, token_influenciador):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = CHAT_PARTICIPANTE
     colecao.update_one.return_value.matched_count = 1
     arquivo = {
         "nome": "proposta.pdf",
@@ -768,8 +1092,9 @@ def test_adicionar_arquivo_ok(mock_conectar_db):
     }
 
     response = app.test_client().post(
-        "/chats/influenciador_1/empresa_1/arquivos",
+        f"{CHAT_URL}/arquivos",
         json=arquivo,
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
     assert response.status_code == 201
@@ -780,10 +1105,11 @@ def test_adicionar_arquivo_ok(mock_conectar_db):
     )
 
 
-def test_adicionar_arquivo_campos_obrigatorios_ausentes():
+def test_adicionar_arquivo_campos_obrigatorios_ausentes(token_influenciador):
     response = app.test_client().post(
-        "/chats/influenciador_1/empresa_1/arquivos",
+        f"{CHAT_URL}/arquivos",
         json={"nome": "proposta.pdf"},
+        headers=cabecalho_autorizacao(token_influenciador),
     )
 
     assert response.status_code == 400
@@ -791,6 +1117,53 @@ def test_adicionar_arquivo_campos_obrigatorios_ausentes():
         "erro": "Campos obrigatórios ausentes",
         "campos_faltantes": ["url", "tipo"],
     }
+
+@pytest.mark.parametrize(
+    ("metodo", "url", "dados"),
+    [
+        ("POST", "/chats", {"id_influenciador": "influenciador_1", "id_empresa": "empresa_1"}),
+        ("GET", CHAT_URL, None),
+        ("POST", f"{CHAT_URL}/mensagens", {"mensagem": "Olá!"}),
+        ("POST", f"{CHAT_URL}/arquivos", {"nome": "a.pdf", "url": "https://exemplo.com/a.pdf", "tipo": "application/pdf"}),
+    ],
+    ids=["criar", "buscar", "mensagem", "arquivo"],
+)
+@patch("api.conectar_db")
+def test_chat_de_outro_usuario_e_negado(
+    mock_conectar_db, token_outro_usuario, metodo, url, dados
+):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = {"username": "outro_usuario"}
+
+    response = app.test_client().open(
+        url,
+        method=metodo,
+        json=dados,
+        headers=cabecalho_autorizacao(token_outro_usuario),
+    )
+
+    assert response.status_code == 403
+    assert response.json == {"erro": "Acesso Negado"}
+
+
+def test_chat_sem_token():
+    response = app.test_client().get(CHAT_URL)
+
+    assert response.status_code == 401
+
+
+@patch("api.conectar_db")
+def test_chat_usuario_do_token_inexistente(mock_conectar_db, token_influenciador):
+    colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
+
+    response = app.test_client().get(
+        CHAT_URL, headers=cabecalho_autorizacao(token_influenciador)
+    )
+
+    assert response.status_code == 401
+    assert response.json == {"erro": "Usuário não encontrado"}
+
 
 def test_adicionar_avaliacao_201():
     with patch('api.conectar_db') as conn:
