@@ -1,144 +1,132 @@
-Para o modelo “admin” e “usuário normal” (influenciador ou empresa), eu aplicaria assim:
+## Avaliações de influenciadores
 
-## Autorização das rotas protegidas
+Separar a nota pública dos comentários detalhados. O alvo deve ser um perfil
+com `tipo_perfil == "influenciador"`; caso contrário, retornar `404`.
 
-`@jwt_required()` resolve apenas a autenticação: confirma que a requisição
-possui um token válido e disponibiliza a identidade do usuário com
-`get_jwt_identity()`. Cada rota também deve aplicar a regra de autorização
-adequada. Neste projeto, a identidade do token é o `username`.
-
-Mantenha o papel de administrador no banco como fonte de verdade. Não confie
-apenas em uma claim do token para essa decisão, pois o usuário pode ter sido
-removido ou ter seu papel alterado depois da emissão do token.
-
-### Usuário dono do perfil ou administrador
-
-Use este decorador em operações sobre `/usuarios/<username>` que podem ser
-feitas pelo próprio titular ou por um administrador:
-
-```python
-from functools import wraps
-from flask import jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
-
-
-def proprio_usuario_ou_admin_required(func):
-    @wraps(func)
-    @jwt_required()
-    def wrapper(*args, **kwargs):
-        username_logado = get_jwt_identity()
-        usuario_logado = conectar_db()["tbl_testes"].find_one(
-            {"username": username_logado},
-            {"_id": 0, "tipo": 1},
-        )
-
-        if usuario_logado is None:
-            return jsonify({"erro": "Usuário não encontrado"}), 401
-
-        username_alvo = kwargs["username"]
-        eh_admin = usuario_logado.get("tipo") == "admin"
-
-        if username_logado != username_alvo and not eh_admin:
-            return jsonify({"erro": "Acesso negado"}), 403
-
-        return func(*args, **kwargs)
-
-    return wrapper
-```
-
-Aplicar em `PATCH /usuarios/<username>` e `DELETE /usuarios/<username>`:
-
-```python
-@app.route("/usuarios/<string:username>", methods=["PATCH"])
-@proprio_usuario_ou_admin_required
-def editar_user(username):
-    ...
-```
-
-### Códigos de resposta
-
-- `401`: token ausente, inválido ou referente a usuário que não existe mais.
-- `403`: token válido, mas usuário sem permissão para aquela ação.
-
-| Rota | JWT | Regra adicional |
+| Rota | Acesso | Regra |
 |---|---:|---|
-| `POST /login` | Não | Pública; recebe credenciais e devolve token. |
-| `POST /usuarios` | Não | Pública para cadastro, mas o servidor nunca pode aceitar `tipo: "admin"` vindo do cliente. Permita apenas `influenciador` ou `empresa`. |
-| `GET /usuarios` | Depende | Pública se for uma vitrine/listagem; nesse caso, nunca retorne `senha`, e idealmente nem e-mail e contato. Se for gestão de usuários, apenas admin. |
-| `GET /usuarios/<username>` | Depende | Pública se for perfil público, com projeção de campos seguros. Se mostrar dados privados, somente o dono ou admin. |
-| `PATCH /usuarios/<username>` | Sim | Usuário normal altera apenas o próprio perfil; admin pode alterar outros. Usuário normal não pode mudar `tipo` para admin. |
-| `DELETE /usuarios/<username>` | Sim | Apenas o próprio usuário ou admin. |
-| `PATCH /usuarios/<username>/assinatura` | Sim | Na simulação, apenas o próprio usuário pode alterar o estado. Em pagamento real, substituir por checkout, cancelamento e webhook. |
-| `POST /chats` | Sim | Identidade do token deve ser um dos dois participantes. |
-| `GET /chats/...` | Sim | Identidade do token deve pertencer à conversa. |
-| `POST .../mensagens` | Sim | Identidade deve ser participante; derive o remetente pelo token, não pelo JSON enviado. |
-| `POST .../arquivos` | Sim | Identidade deve ser participante. |
-| `POST /usuarios/<username>/avaliacoes` | Sim | Derive o avaliador pelo token; não aceite `username` como identidade confiável no corpo. |
-| `GET /admin` | Sim | Além do JWT, verificar no banco se `tipo == "admin"`. |
+| `GET /usuarios/<username>/avaliacoes` | Público | Retorna somente `nota_media` e `quantidade_avaliacoes`. |
+| `GET /usuarios/<username>/avaliacoes/comentarios` | JWT | Apenas `papel == "admin"` ou empresa com assinatura ativa pode ver notas individuais e comentários. Empresa sem assinatura recebe `403`. |
+| `POST /usuarios/<username>/avaliacoes` | JWT | Apenas empresa pode avaliar; o avaliador vem de `get_jwt_identity()`, nunca do JSON. |
+
+O documento em `tbl_avaliacoes` deve guardar, no mínimo:
+
+```json
+{
+  "avaliador_username": "empresa_x",
+  "alvo_username": "influenciador_y",
+  "nota": 5,
+  "conteudo": "Ótima comunicação e bons resultados.",
+  "criado_em": "data ISO 8601"
+}
+```
+
+Não permitir autoavaliação. Também é recomendável limitar a uma avaliação por
+empresa e influenciador e, futuramente, exigir que exista um chat entre ambos.
+Os testes devem cobrir rating público, empresa assinante, empresa sem
+assinatura, influenciador bloqueado, admin, autor forjado no JSON e
+autoavaliação.
 
 ### Assinatura e pagamento
 
-O decorador controla quem pode chamar uma rota; ele não processa nem confirma
-um pagamento. A atual `PATCH /usuarios/<username>/assinatura` funciona como
-uma simulação de plano: depois de protegida com
-`@jwt_required()` e uma comparação entre a identidade do token e o `username`
-da URL, o usuário consegue alterar somente a própria assinatura. Não inclua a
-exceção de administrador nessa rota se o administrador não tiver essa função
-de suporte no produto.
+Substituir a atual rota de simulação por uma integração com um provedor de
+pagamentos externo. O cliente nunca pode definir diretamente `assinatura` ou
+`expiracao_assinatura`; somente o backend, após confirmar o evento do provedor,
+atualiza esses campos.
 
-Para uma assinatura paga real, o cliente nunca deve enviar diretamente
-`assinatura: true` ou `expiracao_assinatura`. O fluxo deve ser:
+Fluxo:
 
 ```text
-usuário autenticado → backend cria checkout → pagamento confirmado
-→ webhook verificado do provedor → backend atualiza a assinatura
+empresa autenticada → backend cria checkout no provedor → frontend redireciona
+→ pagamento/assinatura confirmado → webhook validado → backend atualiza plano
 ```
 
-Nesse cenário, prefira estas rotas:
+Rotas necessárias:
 
 | Rota | Regra |
 |---|---|
-| `POST /usuarios/me/assinatura/checkout` | Requer JWT e inicia o pagamento do usuário logado. |
-| `POST /usuarios/me/assinatura/cancelamento` | Requer JWT e permite cancelar apenas o próprio plano. |
-| `POST /webhooks/pagamentos` | Recebe e valida a assinatura do provedor; é a única rota que ativa, renova ou define a expiração. |
+| `POST /usuarios/me/assinatura/checkout` | Requer JWT; cria a cobrança usando a identidade do token e devolve a URL do checkout. |
+| `POST /usuarios/me/assinatura/cancelamento` | Requer JWT; solicita o cancelamento do plano do usuário logado ao provedor. |
+| `POST /webhooks/pagamentos` | Pública para o provedor; valida a assinatura do evento e é a única que ativa, renova ou define a expiração. |
 
-Para desenvolvimento, eu deixaria algo como:
+No checkout, registrar no banco um pagamento pendente associado ao usuário
+logado e ao identificador externo da cobrança. No webhook:
 
-```python
-CORS(app, origins=["http://localhost:5173"])
-app.run(debug=True)
+1. Validar a assinatura enviada pelo provedor.
+2. Consultar o pagamento ou assinatura na API do provedor, em vez de confiar
+   apenas no corpo recebido.
+3. Confirmar que o status é aprovado/ativo e que a referência pertence ao
+   usuário esperado.
+4. Processar cada identificador de evento uma única vez, para evitar renovações
+   duplicadas quando o webhook for reenviado.
+
+As chaves da API e do webhook ficam apenas em variáveis de ambiente do backend.
+Para cobrança recorrente, usar o recurso de assinaturas do provedor escolhido;
+para pagamento único, criar um checkout por período de acesso.
+
+## Análises de influenciadores para empresas
+
+As análises devem ser um recurso separado do perfil público. A empresa que faz
+a consulta define o nível de acesso; a assinatura do influenciador analisado
+não interfere nessa decisão.
+
+### Contrato de acesso
+
+Uma rota inicial pode ser:
+
+```text
+GET /influenciadores/<username>/analise
 ```
 
-No deploy, use variáveis de ambiente para desligar `debug` e configurar somente a origem real do frontend. O problema principal permanece sendo autorização: hoje apenas `/admin` usa JWT, então as demais rotas não distinguem quem está chamando a API.
+Ela deve exigir JWT e consultar o usuário logado no banco. O acesso segue
+estas regras:
 
+- `papel == "admin"`: acesso completo para suporte e gestão.
+- `tipo_perfil == "empresa"` com assinatura ativa: análise completa.
+- `tipo_perfil == "empresa"` sem assinatura ativa: análise parcial.
+- `tipo_perfil == "influenciador"`: `403`, pois influenciadores não usam essa
+  rota para consultar análises de mercado.
+- O usuário alvo precisa ter `tipo_perfil == "influenciador"`; caso contrário,
+  retornar `404`.
 
-| Objetivo | Rota sugerida | JWT |
-|---|---|---:|
-| Listar empresas e influenciadores disponíveis | `GET /perfis` | Não |
-| Ver perfil público | `GET /perfis/<username>` | Não |
-| Listar todos os usuários para gestão | `GET /usuarios` | Sim, admin |
-| Ver dados completos de um usuário | `GET /usuarios/<username>` | Sim, próprio usuário ou admin |
+O backend deve calcular `assinatura ativa` a partir de `assinatura` e
+`expiracao_assinatura` persistidas no banco. Nunca receba o nível de acesso do
+cliente nem confie apenas em uma claim antiga do token.
 
-`GET /perfis` deve retornar somente dados de vitrine, por exemplo:
+Uma resposta parcial deve conter apenas indicadores gerais, por exemplo:
 
 ```json
 {
+  "nivel_acesso": "parcial",
   "username": "ana-criadora",
-  "nome": "Ana",
-  "tipo_perfil": "influenciador",
-  "nicho": "Moda",
-  "plataformas": ["Instagram"],
-  "descricao": "..."
+  "seguidores": 120000,
+  "taxa_engajamento": 4.2,
+  "analise_completa_disponivel": true
 }
 ```
 
-Nunca inclua `senha` (nem hash), e-mail, contato, assinatura ou dados administrativos nessas rotas públicas. Também filtre usuários `admin`, para que eles não apareçam como perfis disponíveis.
+A resposta completa mantém esses campos e acrescenta histórico de seguidores,
+engajamento por plataforma, melhores horários e demografia. Manter o mesmo
+formato-base evita que o frontend precise de duas telas diferentes.
 
-Eu separaria o modelo assim:
+### Caminho de implementação
 
-```json
-{
-  "papel": "admin | usuario",
-  "tipo_perfil": "empresa | influenciador"
-}
-```
+1. Começar com uma coleção `analises_influenciadores`, separada de
+   `tbl_testes`, preenchida manualmente ou por dados de demonstração. Cada
+   documento deve ter `username`, `atualizado_em`, métricas gerais e métricas
+   detalhadas.
+2. Criar a rota acima e um serviço que transforma o mesmo documento em visão
+   parcial ou completa conforme o acesso da empresa.
+3. Registrar snapshots em uma coleção de métricas, com plataforma e data, para
+   formar séries históricas sem sobrescrever dados antigos.
+4. Quando houver dados reais, integrar apenas APIs oficiais das plataformas ou
+   importações autorizadas pelo influenciador. Uma tarefa agendada coleta os
+   dados, grava o snapshot e recalcula os indicadores derivados.
+
+Os primeiros testes devem cobrir empresa sem assinatura, empresa assinante,
+influenciador bloqueado, admin e alvo que não é influenciador.
+
+## Configuração de deploy
+
+Restringir o CORS à origem configurada do frontend e controlar `debug` por
+variável de ambiente, deixando-o desligado em produção.
