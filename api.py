@@ -52,6 +52,27 @@ def usuario_ou_admin_required(func):
 
     return wrapper
 
+def admin_required(func):
+    @wraps(func)
+    @jwt_required()
+
+    def wrapper(*args,**kwargs):
+        username = get_jwt_identity()
+
+        usuario = conectar_db()["tbl_testes"].find_one(
+            {"username":username},
+            {"_id":0},
+        )
+
+        if usuario is None:
+            return jsonify({"erro":"Usuário não encontrado"}),404
+
+        if usuario.get("papel") != "admin":
+            return jsonify({"erro":"Acesso negado"}),403
+
+        return func(*args,**kwargs)
+    return wrapper
+
 TIPO_PERFIL = {"empresa","influenciador"}
 CAMPOS_PUBLICOS = {
     "_id":0,
@@ -79,7 +100,7 @@ def lista_users():
         conectar_db()['tbl_testes'].find(filtro, CAMPOS_PUBLICOS)
     )
 
-    return  jsonify(usuarios),200
+    return jsonify(usuarios),200
 
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
@@ -550,21 +571,37 @@ def avaliar(username):
     return jsonify({"mensagem": "Avaliação feita com sucesso"}), 201
 
 @app.route("/admin", methods=['GET'])
-@jwt_required()
-def admin_panel():
-    current_user_id = get_jwt_identity()
-    user = conectar_db()["tbl_testes"].find_one(
-        {"username": current_user_id},
-        {"_id": 0},
-    )
-
-    if user is None:
-        return jsonify({"erro": "Usuário não encontrado"}), 404
-
-    if user.get("papel") != "admin":
-        return jsonify({"erro": "Acesso negado"}), 403
-    
+@admin_required
+def admin_panel():    
     return jsonify({"mensagem": "Acesso concedido, bem-vindo chefe"}), 200
+
+@app.route("/admin/usuarios",methods=["GET"])
+@admin_required
+def admin_listar_user():
+
+    usuarios = list(conectar_db()["tbl_testes"].find(
+        {},
+        {"_id":0,
+         "senha":0,
+        }
+    ))
+
+    return jsonify(usuarios),200
+
+@app.route("/admin/usuario/<string:username>",methods=["GET"])
+@admin_required
+def admin_busca_user(username):
+    usuario = conectar_db()["tbl_testes"].find_one(
+            {"username": username,"papel":"usuario"},
+            {"_id":0,
+             "senha":0},
+        )
+    
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    return jsonify(usuario), 200
+        
+
 
 if __name__ == '__main__':
     app.run(debug=True)
