@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 from datetime import timedelta
 from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
@@ -127,6 +127,111 @@ def test_admin_token_expirado(client, token_admin):
 
         assert response.status_code == 401
         conn.assert_not_called()
+
+
+def test_admin_lista_usuarios_permitida(client, token_admin):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "testeadmin", "papel": "admin"
+        }
+        colecao.find.return_value = [
+            {"username": "empresa_1", "papel": "usuario"},
+            {"username": "influenciador_1", "papel": "usuario"},
+        ]
+
+        response = client.get(
+            "/admin/usuarios", headers=cabecalho_autorizacao(token_admin)
+        )
+
+        assert response.status_code == 200
+        assert response.json == [
+            {"username": "empresa_1", "papel": "usuario"},
+            {"username": "influenciador_1", "papel": "usuario"},
+        ]
+        colecao.find_one.assert_called_once_with(
+            {"username": "testeadmin"}, {"_id": 0}
+        )
+        colecao.find.assert_called_once_with({}, {"_id": 0, "senha": 0})
+
+
+def test_admin_lista_usuarios_negada_para_usuario_comum(client, token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {
+            "username": "rafacelduds", "papel": "usuario"
+        }
+
+        response = client.get(
+            "/admin/usuarios", headers=cabecalho_autorizacao(token_usuario)
+        )
+
+        assert response.status_code == 403
+        assert response.json == {"erro": "Acesso negado"}
+        colecao.find.assert_not_called()
+
+
+def test_admin_lista_usuarios_sem_token(client):
+    with patch("api.conectar_db") as conn:
+        response = client.get("/admin/usuarios")
+
+        assert response.status_code == 401
+        conn.assert_not_called()
+
+
+def test_admin_busca_usuario_permitida(client, token_admin):
+    usuario = {
+        "username": "empresa_1",
+        "nome": "Empresa Um",
+        "papel": "usuario",
+        "tipo_perfil": "empresa",
+    }
+
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [
+            {"username": "testeadmin", "papel": "admin"},
+            usuario,
+        ]
+
+        response = client.get(
+            "/admin/usuario/empresa_1", headers=cabecalho_autorizacao(token_admin)
+        )
+
+        assert response.status_code == 200
+        assert response.json == usuario
+        assert colecao.find_one.call_args_list == [
+            call({"username": "testeadmin"}, {"_id": 0}),
+            call(
+                {"username": "empresa_1", "papel": "usuario"},
+                {"_id": 0, "senha": 0},
+            ),
+        ]
+
+
+def test_admin_busca_usuario_inexistente(client, token_admin):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [
+            {"username": "testeadmin", "papel": "admin"},
+            None,
+        ]
+
+        response = client.get(
+            "/admin/usuario/inexistente", headers=cabecalho_autorizacao(token_admin)
+        )
+
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário não encontrado"}
+
+
+def test_admin_busca_usuario_sem_token(client):
+    with patch("api.conectar_db") as conn:
+        response = client.get("/admin/usuario/empresa_1")
+
+        assert response.status_code == 401
+        conn.assert_not_called()
+
 
 @pytest.fixture
 def client():
