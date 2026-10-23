@@ -1,4 +1,5 @@
 import os
+import re
 from functools import lru_cache,wraps
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -116,6 +117,25 @@ def buscar_user(username):
 @app.route('/usuarios/<string:username>', methods=['DELETE'])
 @usuario_ou_admin_required
 def delete_user(username):
+
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+    
+    senha = dados.get("senha")
+    if not isinstance(senha,str) or not senha.strip():
+        return jsonify({"erro":"Por favor insira uma senha válida"}),400
+
+    dados_user = conectar_db()["tbl_testes"].find_one(
+        {"username":get_jwt_identity()},     
+    )
+
+    if dados_user is None:
+        return jsonify({"erro":"Usuário não encontrado"}),404
+
+    if not bcrypt.check_password_hash(dados_user["senha"],senha):
+        return jsonify({"erro":"A senha inválida, por favor digite a senha do usuário atual"}),400
+
     usuario = conectar_db()["tbl_testes"].delete_one(
         {"username": username},
     )
@@ -123,6 +143,23 @@ def delete_user(username):
     if usuario.deleted_count == 0:
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
+
+
+def email_valido(email):
+    if not isinstance(email,str):
+        return False
+
+    return re.fullmatch(
+        r"[^@\s]+@[^@\s]+\.[^@\s]+",
+        email.strip()
+    ) is not None
+
+def contato_valido(contato):
+    if not isinstance(contato, str):
+        return False
+
+    numero = re.sub(r"[()\s-]", "", contato)
+    return re.fullmatch(r"[0-9]{10,11}", numero) is not None
 
 
 @app.route("/usuarios",methods=['POST'])
@@ -157,6 +194,13 @@ def criar_user():
         "erro": "Campos obrigatórios ausentes",
         "campos_faltantes": campos_faltantes
     }),400
+
+    if not email_valido(novo_usuario["email"]):
+        return jsonify({"erro": "Formato de e-mail inválido"}), 400
+    novo_usuario["email"] = novo_usuario["email"].strip()
+
+    if not contato_valido(novo_usuario["contato"]):
+        return jsonify({"erro": "Contato deve ter 10 ou 11 dígitos, incluindo o DDD"}), 400
 
     tipo_perfil = novo_usuario["tipo_perfil"]
     if not isinstance(tipo_perfil, str) or tipo_perfil not in TIPO_PERFIL:
@@ -213,6 +257,12 @@ def editar_user(username):
         "nicho", "plataformas", "descricao",
     }
 
+    if "email" in dados:
+        if not email_valido(dados["email"]):
+            return jsonify({"erro": "Formato de e-mail inválido"}), 422
+
+        dados["email"] = dados["email"].strip()
+
     if "papel" in dados:
         return jsonify({"erro":"Papel não pode ser alterado"}),400
 
@@ -228,6 +278,9 @@ def editar_user(username):
             not isinstance(dados[campo], str) or not dados[campo].strip()
         ):
             return jsonify({"erro": f"Valor inválido para {campo}"}), 422
+
+    if "contato" in dados and not contato_valido(dados["contato"]):
+        return jsonify({"erro": "Contato deve ter 10 ou 11 dígitos, incluindo o DDD"}), 422
 
     if "plataformas" in dados:
         plataformas = dados["plataformas"]
@@ -627,6 +680,11 @@ def criar_admin():
         "erro": "Campos obrigatórios ausentes",
         "campos_faltantes": campos_faltantes
     }),400
+
+    if not email_valido(novo_admin["email"]):
+        return jsonify({"erro": "Formato de e-mail inválido"}), 400
+
+    novo_admin["email"] = novo_admin["email"].strip()
 
     senha = novo_admin["senha"]
 

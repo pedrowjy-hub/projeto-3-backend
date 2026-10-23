@@ -4,6 +4,48 @@ from datetime import timedelta
 from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
 
+@pytest.mark.parametrize("metodo", ["post", "patch"])
+@pytest.mark.parametrize("contato,valido", [
+    ("1133334444", True), ("11999998888", True),
+    ("(11) 3333-4444", True), ("(11) 99999-8888", True),
+    ("123456789", False), ("123456789012", False),
+    (None, False), (11999998888, False), (True, False),
+    ("", False), ("   ", False), ([], False), ({}, False),
+    ("abc11999998888", False), ("11.99999.8888", False),
+])
+def test_validacao_contato(token_usuario, metodo, contato, valido):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value["tbl_testes"]
+        if metodo == "post":
+            colecao.find_one.return_value = None
+            response = app.test_client().post("/usuarios", json={
+                "nome": "Teste", "username": "novo_usuario", "email": "teste@example.com",
+                "contato": contato, "tipo_perfil": "empresa", "nicho": "moda",
+                "plataformas": ["Instagram"], "senha": "senha-teste",
+            })
+            assert response.status_code == (201 if valido else 400)
+            if valido:
+                colecao.insert_one.assert_called_once()
+                assert colecao.insert_one.call_args.args[0]["contato"] == contato
+            else:
+                colecao.insert_one.assert_not_called()
+        else:
+            colecao.find_one.side_effect = [
+                {"papel": "usuario"}, {"username": "rafacelduds"}, None,
+            ]
+            response = app.test_client().patch(
+                "/usuarios/rafacelduds", json={"contato": contato},
+                headers=cabecalho_autorizacao(token_usuario),
+            )
+            assert response.status_code == (200 if valido else 422)
+            if valido:
+                colecao.update_one.assert_called_once_with(
+                    {"username": "rafacelduds"}, {"$set": {"contato": contato}},
+                )
+            else:
+                colecao.update_one.assert_not_called()
+
+
 PROJECAO_PUBLICA = {
     "_id": 0,
     "username": 1,
@@ -88,6 +130,28 @@ def test_criar_admin_sucesso(
     assert salvo["senha"] != dados_novo_admin["senha"]
     assert bcrypt.check_password_hash(salvo["senha"], dados_novo_admin["senha"])
     assert "senha" not in response.json
+
+
+@pytest.mark.parametrize("email", [None, 123, "", "   ", "sem-arroba.com", "nome@dominio", "nome @exemplo.com"])
+def test_criar_admin_email_invalido(client, token_admin, dados_novo_admin, colecao_criar_admin, email):
+    dados_novo_admin["email"] = email
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 400
+    assert response.json == {"erro": "Formato de e-mail inválido"}
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+def test_criar_admin_email_com_espacos(client, token_admin, dados_novo_admin, colecao_criar_admin):
+    dados_novo_admin["email"] = "  novo_admin@example.com  "
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 201
+    assert colecao_criar_admin.insert_one.call_args.args[0]["email"] == "novo_admin@example.com"
 
 
 @pytest.mark.parametrize("identificador", ["novo_admin", "novo_admin@example.com"])
@@ -449,41 +513,117 @@ def test_buscar_user_404():
         assert response.status_code == 404
         colecao.find_one.assert_called_once()
 
-def test_deletar_user(token_usuario):
+@pytest.fixture(scope="module")
+def hash_senha_exclusao():
+    return bcrypt.generate_password_hash("senha-atual-teste").decode("utf-8")
+
+
+@pytest.mark.parametrize("token_fixture,solicitante,alvo,papel", [
+    ("token_usuario", "rafacelduds", "rafacelduds", "usuario"),
+    ("token_admin", "testeadmin", "rafacelduds", "admin"),
+    ("token_admin", "testeadmin", "outro_admin", "admin"),
+])
+def test_deletar_user(request, hash_senha_exclusao, token_fixture, solicitante, alvo, papel):
+    token = request.getfixturevalue(token_fixture)
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = {
-            "username": "rafacelduds", "papel": "usuario"
+            "username": solicitante, "papel": papel, "senha": hash_senha_exclusao,
         }
         colecao.delete_one.return_value.deleted_count = 1
 
         response = app.test_client().delete(
-            "/usuarios/rafacelduds",
-            headers=cabecalho_autorizacao(token_usuario),
+            f"/usuarios/{alvo}",
+            headers=cabecalho_autorizacao(token),
+            json={"senha": "senha-atual-teste"},
         )
         assert response.status_code == 204
-        colecao.find_one.assert_called_once_with(
-            {"username": "rafacelduds"}, {"_id": 0, "papel": 1}
-        )
+        assert colecao.find_one.call_args_list == [
+            call({"username": solicitante}, {"_id": 0, "papel": 1}),
+            call({"username": solicitante}),
+        ]
         colecao.delete_one.assert_called_once_with(
-            {"username": "rafacelduds"}
+            {"username": alvo}
         )
 
-def test_deletar_user_404(token_admin):
+def test_deletar_user_404(token_admin, hash_senha_exclusao):
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = {
-            "username": "testeadmin", "papel": "admin"
+            "username": "testeadmin", "papel": "admin", "senha": hash_senha_exclusao,
         }
         colecao.delete_one.return_value.deleted_count = 0
 
         response = app.test_client().delete(
             "/usuarios/fulano",
             headers=cabecalho_autorizacao(token_admin),
+            json={"senha": "senha-atual-teste"},
         )
 
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário não encontrado"}
+        colecao.delete_one.assert_called_once_with({"username": "fulano"})
+
+
+@pytest.mark.parametrize("corpo", ["", "{", "null", "[]", '"senha"', "123"])
+def test_deletar_user_json_invalido(token_usuario, corpo):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {"papel": "usuario"}
+        response = app.test_client().delete(
+            "/usuarios/rafacelduds",
+            headers=cabecalho_autorizacao(token_usuario),
+            data=corpo, content_type="application/json",
+        )
+        assert response.status_code == 400
+        assert response.json == {"erro": "JSON inválido"}
+        colecao.delete_one.assert_not_called()
+
+
+@pytest.mark.parametrize("corpo", [{}, {"senha": None}, {"senha": ""},
+    {"senha": "   "}, {"senha": 123}, {"senha": []}, {"senha": {}}, {"senha": True}])
+def test_deletar_user_senha_invalida(token_usuario, corpo):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {"papel": "usuario"}
+        response = app.test_client().delete(
+            "/usuarios/rafacelduds",
+            headers=cabecalho_autorizacao(token_usuario), json=corpo,
+        )
+        assert response.status_code == 400
+        assert response.json == {"erro": "Por favor insira uma senha válida"}
+        colecao.delete_one.assert_not_called()
+
+
+@pytest.mark.parametrize("token_fixture,alvo,papel", [
+    ("token_usuario", "rafacelduds", "usuario"),
+    ("token_admin", "outro_usuario", "admin"),
+])
+def test_deletar_user_senha_incorreta(request, hash_senha_exclusao, token_fixture, alvo, papel):
+    token = request.getfixturevalue(token_fixture)
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.return_value = {"papel": papel, "senha": hash_senha_exclusao}
+        response = app.test_client().delete(
+            f"/usuarios/{alvo}", headers=cabecalho_autorizacao(token),
+            json={"senha": "senha-incorreta"},
+        )
+        assert response.status_code == 400
+        assert response.json == {"erro": "A senha inválida, por favor digite a senha do usuário atual"}
+        colecao.delete_one.assert_not_called()
+
+
+def test_deletar_user_solicitante_nao_encontrado(token_admin):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value.__getitem__.return_value
+        colecao.find_one.side_effect = [{"papel": "admin"}, None]
+        response = app.test_client().delete(
+            "/usuarios/fulano", headers=cabecalho_autorizacao(token_admin),
+            json={"senha": "senha-atual-teste"},
+        )
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário não encontrado"}
+        colecao.delete_one.assert_not_called()
 
 
 def test_deletar_user_sem_token():
@@ -504,6 +644,7 @@ def test_deletar_user_de_outro_usuario_e_negado(token_outro_usuario):
         response = app.test_client().delete(
             "/usuarios/rafacelduds",
             headers=cabecalho_autorizacao(token_outro_usuario),
+            json={"senha": "senha-atual-teste"},
         )
 
         assert response.status_code == 403
