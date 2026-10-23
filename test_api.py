@@ -47,6 +47,184 @@ def cabecalho_autorizacao(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.fixture
+def dados_novo_admin():
+    return {
+        "nome": "Novo Administrador",
+        "username": "novo_admin",
+        "email": "novo_admin@example.com",
+        "senha": "senha-segura-de-teste",
+    }
+
+
+@pytest.fixture
+def colecao_criar_admin():
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value["tbl_testes"]
+        colecao.find_one.side_effect = [
+            {"username": "testeadmin", "papel": "admin"},
+            None,
+        ]
+        yield colecao
+
+
+def test_criar_admin_sucesso(
+    client, token_admin, dados_novo_admin, colecao_criar_admin
+):
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+
+    assert response.status_code == 201
+    assert response.json == {
+        "mensagem": "Admin criado com sucesso", "usuario": "novo_admin"
+    }
+    colecao_criar_admin.insert_one.assert_called_once()
+    salvo = colecao_criar_admin.insert_one.call_args.args[0]
+    for campo in ("nome", "username", "email"):
+        assert salvo[campo] == dados_novo_admin[campo]
+    assert salvo["papel"] == "admin"
+    assert salvo["senha"] != dados_novo_admin["senha"]
+    assert bcrypt.check_password_hash(salvo["senha"], dados_novo_admin["senha"])
+    assert "senha" not in response.json
+
+
+@pytest.mark.parametrize("identificador", ["novo_admin", "novo_admin@example.com"])
+def test_criar_admin_login_e_acesso(
+    client, token_admin, dados_novo_admin, colecao_criar_admin, identificador
+):
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 201
+    salvo = colecao_criar_admin.insert_one.call_args.args[0]
+    # As próximas consultas retornam o documento realmente criado pela rota.
+    colecao_criar_admin.find_one.side_effect = None
+    colecao_criar_admin.find_one.return_value = salvo
+
+    login = client.post(
+        "/login",
+        json={"identificador": identificador, "senha": dados_novo_admin["senha"]},
+    )
+    assert login.status_code == 200
+    with app.app_context():
+        claims = decode_token(login.json["access_token"])
+    assert claims["sub"] == dados_novo_admin["username"]
+    assert claims["email"] == dados_novo_admin["email"]
+    acesso = client.get(
+        "/admin", headers=cabecalho_autorizacao(login.json["access_token"])
+    )
+    assert acesso.status_code == 200
+
+
+@pytest.mark.parametrize("campo", ["nome", "username", "email", "senha"])
+def test_criar_admin_campo_obrigatorio_ausente(
+    client, token_admin, dados_novo_admin, colecao_criar_admin, campo
+):
+    del dados_novo_admin[campo]
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 400
+    assert response.json == {
+        "erro": "Campos obrigatórios ausentes", "campos_faltantes": [campo]
+    }
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize("corpo", ["", "{", "null", "[]", '"texto"', "42", "false"])
+def test_criar_admin_json_invalido(client, token_admin, colecao_criar_admin, corpo):
+    response = client.post(
+        "/admin", data=corpo, content_type="application/json",
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 400
+    assert response.json == {"erro": "JSON inválido"}
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize("senha", ["", "   ", None, 123, [], {}])
+def test_criar_admin_senha_invalida(
+    client, token_admin, dados_novo_admin, colecao_criar_admin, senha
+):
+    dados_novo_admin["senha"] = senha
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 400
+    assert response.json == {"erro": "Senha no formato inválido"}
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+def test_criar_admin_username_duplicado(
+    client, token_admin, dados_novo_admin, colecao_criar_admin
+):
+    colecao_criar_admin.find_one.side_effect = [
+        {"username": "testeadmin", "papel": "admin"},
+        {"username": "novo_admin", "papel": "usuario"},
+    ]
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == 409
+    assert response.json == {"erro": "Conflito: username já cadastrado"}
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "usuario,status",
+    [({"username": "testeadmin", "papel": "usuario"}, 403),
+     ({"username": "testeadmin"}, 403), (None, 404)],
+)
+def test_criar_admin_acesso_negado(
+    client, token_admin, dados_novo_admin, colecao_criar_admin, usuario, status
+):
+    colecao_criar_admin.find_one.side_effect = None
+    colecao_criar_admin.find_one.return_value = usuario
+    response = client.post(
+        "/admin", json=dados_novo_admin,
+        headers=cabecalho_autorizacao(token_admin),
+    )
+    assert response.status_code == status
+    colecao_criar_admin.insert_one.assert_not_called()
+
+
+def test_criar_admin_sem_token(client, dados_novo_admin):
+    with patch("api.conectar_db") as conn:
+        response = client.post("/admin", json=dados_novo_admin)
+    assert response.status_code == 401
+    conn.assert_not_called()
+
+
+def test_criar_admin_token_invalido(client, token_admin, dados_novo_admin):
+    with patch("api.conectar_db") as conn:
+        response = client.post(
+            "/admin", json=dados_novo_admin,
+            headers=cabecalho_autorizacao("token-invalido"),
+        )
+    assert response.status_code == 422
+    conn.assert_not_called()
+
+
+def test_criar_admin_token_expirado(client, token_admin, dados_novo_admin):
+    with app.app_context():
+        token = create_access_token(
+            identity="testeadmin", expires_delta=timedelta(minutes=-1)
+        )
+    with patch("api.conectar_db") as conn:
+        response = client.post(
+            "/admin", json=dados_novo_admin,
+            headers=cabecalho_autorizacao(token),
+        )
+    assert response.status_code == 401
+    conn.assert_not_called()
+
+
 def test_admin_acesso_permitido(client, token_admin):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
@@ -424,6 +602,7 @@ def test_listar_rejeita_tipo_perfil_invalido(mock_conectar_db):
 @patch("api.conectar_db")
 def test_criar_user_ok(mock_conectar_db, novo_user):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
 
     response = app.test_client().post("/usuarios", json=novo_user)
     
@@ -494,6 +673,7 @@ def test_criar_user_username_ja_cadastrado(mock_conectar_db):
 @patch("api.conectar_db")
 def test_criar_user_armazena_senha_com_hash(mock_conectar_db):
     colecao = mock_conectar_db.return_value.__getitem__.return_value
+    colecao.find_one.return_value = None
 
     novo_user = {
         "username": "pedrow2",

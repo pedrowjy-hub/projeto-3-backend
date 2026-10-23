@@ -185,7 +185,7 @@ def criar_user():
         {"username":novo_usuario["username"]}
     )
 
-    if isinstance(usuario_existente, dict):
+    if usuario_existente is not None:
         return jsonify(
             {"erro": "Conflito: username já cadastrado"}
         ),409
@@ -601,7 +601,60 @@ def admin_busca_user(username):
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(usuario), 200
         
+@app.route("/admin",methods=["POST"])
+@admin_required
+def criar_admin():
 
+    novo_admin = request.get_json(silent=True)
+
+    if not isinstance(novo_admin,dict):
+        return jsonify({"erro":"JSON inválido"}),400
+
+    campos_obrigatorios = [
+                "nome",
+                "username",
+                "email",
+                "senha"
+            ]
+
+    campos_faltantes = [
+            campo for campo in campos_obrigatorios
+            if campo not in novo_admin
+        ]
+    
+    if campos_faltantes:
+        return jsonify({
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": campos_faltantes
+    }),400
+
+    senha = novo_admin["senha"]
+
+    if (not isinstance(senha,str) or not senha.strip()):
+        return jsonify({"erro":"Senha no formato inválido"}),400
+
+    novo_admin["senha"] = bcrypt.generate_password_hash(senha).decode("utf-8")
+
+    colecao = conectar_db()['tbl_testes']
+        
+    usuario_existente = colecao.find_one(
+        {"username":novo_admin["username"]}
+    )
+
+    if usuario_existente is not None:
+        return jsonify(
+            {"erro": "Conflito: username já cadastrado"}
+        ),409
+
+    novo_admin["papel"] = "admin"
+
+    colecao.insert_one(novo_admin)
+
+    return jsonify(
+            {
+            "mensagem": "Admin criado com sucesso",
+            "usuario": novo_admin["username"],
+        }),201
 
 if __name__ == '__main__':
     app.run(debug=True)
