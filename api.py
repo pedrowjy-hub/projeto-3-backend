@@ -55,7 +55,7 @@ def serializar_postagem(postagem):
 
 
 def obter_usuario_da_postagem(username):
-    usuario = conectar_db()["tbl_testes"].find_one(
+    usuario = conectar_db()["tbl_usuarios"].find_one(
         {"username": username},
         {"_id": 1, "papel": 1},
     )
@@ -81,7 +81,7 @@ def usuario_ou_admin_required(func):
     @jwt_required()
     def wrapper(*args, **kwargs):
         username_logado = get_jwt_identity()
-        user_logado  = conectar_db()["tbl_testes"].find_one(
+        user_logado  = conectar_db()["tbl_usuarios"].find_one(
             {"username":username_logado},
             {"_id":0,"papel":1}
         )
@@ -106,7 +106,7 @@ def admin_required(func):
     def wrapper(*args,**kwargs):
         username = get_jwt_identity()
 
-        usuario = conectar_db()["tbl_testes"].find_one(
+        usuario = conectar_db()["tbl_usuarios"].find_one(
             {"username":username},
             {"_id":0},
         )
@@ -134,7 +134,7 @@ CAMPOS_PUBLICOS = {
 @app.route('/me', methods=['GET'])
 @jwt_required()
 def minha_conta():
-    usuario = conectar_db()["tbl_testes"].find_one(
+    usuario = conectar_db()["tbl_usuarios"].find_one(
         {"username": get_jwt_identity()},
         {**CAMPOS_PUBLICOS, "email": 1, "contato": 1, "papel": 1},
     )
@@ -156,14 +156,14 @@ def lista_users():
         filtro["tipo_perfil"] = tipo_perfil
 
     usuarios = list(
-        conectar_db()['tbl_testes'].find(filtro, CAMPOS_PUBLICOS)
+        conectar_db()['tbl_usuarios'].find(filtro, CAMPOS_PUBLICOS)
     )
 
     return jsonify(usuarios),200
 
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
-    usuario = conectar_db()["tbl_testes"].find_one(
+    usuario = conectar_db()["tbl_usuarios"].find_one(
         {"username": username,"papel":"usuario"},
         CAMPOS_PUBLICOS,
     )
@@ -184,7 +184,7 @@ def delete_user(username):
     if not isinstance(senha,str) or not senha.strip():
         return jsonify({"erro":"Por favor insira uma senha válida"}),400
 
-    dados_user = conectar_db()["tbl_testes"].find_one(
+    dados_user = conectar_db()["tbl_usuarios"].find_one(
         {"username":get_jwt_identity()},     
     )
 
@@ -194,7 +194,7 @@ def delete_user(username):
     if not bcrypt.check_password_hash(dados_user["senha"],senha):
         return jsonify({"erro":"A senha inválida, por favor digite a senha do usuário atual"}),400
 
-    usuario = conectar_db()["tbl_testes"].delete_one(
+    usuario = conectar_db()["tbl_usuarios"].delete_one(
         {"username": username},
     )
 
@@ -281,7 +281,7 @@ def criar_user():
     ):
         return jsonify({"erro": "Plataformas inválidas"}), 400
 
-    colecao = conectar_db()['tbl_testes']
+    colecao = conectar_db()['tbl_usuarios']
     
     usuario_existente = colecao.find_one(
         {"username":novo_usuario["username"]}
@@ -358,7 +358,7 @@ def editar_user(username):
     if ("tipo_perfil" in dados and dados["tipo_perfil"] not in TIPO_PERFIL):
         return jsonify({"erro":"Tipo de perfil deve ser empresa ou influenciador"}),422
 
-    colecao = conectar_db()["tbl_testes"]
+    colecao = conectar_db()["tbl_usuarios"]
     if colecao.find_one({"username": username}) is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
 
@@ -428,7 +428,7 @@ def alterar_assinatura(username):
             "$unset": {"expiracao_assinatura": ""},
         }
 
-    colecao = conectar_db()["tbl_testes"]
+    colecao = conectar_db()["tbl_usuarios"]
 
     usuario = colecao.find_one({"username": username})
     if usuario is None:
@@ -463,7 +463,7 @@ def login():
             "erro": "Identificador e senha são obrigatórios"
         }),400
 
-    colecao = conectar_db()["tbl_testes"]
+    colecao = conectar_db()["tbl_usuarios"]
 
     usuario = colecao.find_one({
         "$or": [
@@ -481,7 +481,7 @@ def login():
 
 def obter_usuario_participante(id_influenciador, id_empresa):
     username_logado = get_jwt_identity()
-    usuario_logado = conectar_db()["tbl_testes"].find_one(
+    usuario_logado = conectar_db()["tbl_usuarios"].find_one(
         {"username": username_logado},
         {"_id": 0, "username": 1},
     )
@@ -662,12 +662,12 @@ def avaliar(username):
 
     db = conectar_db()
 
-    usuario_alvo = db["tbl_testes"].find_one({"username": username})
+    usuario_alvo = db["tbl_usuarios"].find_one({"username": username})
 
     if usuario_alvo is None:
         return jsonify({"erro": "Usuário alvo não encontrado"}), 404
 
-    usuario_avaliador = db["tbl_testes"].find_one({"username": dados["username"]})
+    usuario_avaliador = db["tbl_usuarios"].find_one({"username": dados["username"]})
 
     if usuario_avaliador is None:
         return jsonify({"erro": "Usuário criador não encontrado"}), 404
@@ -690,7 +690,7 @@ def admin_panel():
 @admin_required
 def admin_listar_user():
 
-    usuarios = list(conectar_db()["tbl_testes"].find(
+    usuarios = list(conectar_db()["tbl_usuarios"].find(
         {},
         {"_id":0,
          "senha":0,
@@ -702,7 +702,7 @@ def admin_listar_user():
 @app.route("/admin/usuario/<string:username>",methods=["GET"])
 @admin_required
 def admin_busca_user(username):
-    usuario = conectar_db()["tbl_testes"].find_one(
+    usuario = conectar_db()["tbl_usuarios"].find_one(
             {"username": username,"papel":"usuario"},
             {"_id":0,
              "senha":0},
@@ -751,7 +751,7 @@ def criar_admin():
 
     novo_admin["senha"] = bcrypt.generate_password_hash(senha).decode("utf-8")
 
-    colecao = conectar_db()['tbl_testes']
+    colecao = conectar_db()['tbl_usuarios']
         
     usuario_existente = colecao.find_one(
         {"username":novo_admin["username"]}
