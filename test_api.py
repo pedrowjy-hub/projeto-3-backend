@@ -1809,8 +1809,9 @@ def mock_collections_postagem(db):
     usuarios = MagicMock()
     postagens = MagicMock()
     db.__getitem__.side_effect = {
-        "tbl_testes": usuarios,
+        "tbl_usuarios": usuarios,
         "tbl_postagens": postagens,
+        "tbl_midias_postagens": MagicMock(),
     }.__getitem__
     return usuarios, postagens
 
@@ -1915,7 +1916,9 @@ def test_criar_postagem_usuario_inexistente(client, token_usuario):
 
 def test_listar_postagens_sucesso_sem_binario(client):
     with patch("api.conectar_db") as conectar_db:
-        conectar_db.return_value["tbl_postagens"].find.return_value = [{
+        usuarios, postagens = mock_collections_postagem(conectar_db.return_value)
+        usuarios.find.return_value = []
+        postagens.find.return_value = [{
             "_id": ID_POSTAGEM_TESTE,
             "usuario_id": ID_USUARIO_POSTAGEM,
             "titulo": "Post público",
@@ -1936,6 +1939,7 @@ def test_listar_postagens_sucesso_sem_binario(client):
             "titulo": "Post público",
             "descricao": "Descrição",
             "midia": {"nome": "foto.png", "tipo": "image/png"},
+            "autor": None,
         }]
         conectar_db.return_value["tbl_postagens"].find.assert_called_once_with(
             {}, {"midia.dados": 0}
