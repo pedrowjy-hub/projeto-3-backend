@@ -1,14 +1,16 @@
 import os
 import re
+from io import BytesIO
 from functools import lru_cache,wraps
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 from pymongo import MongoClient
+from bson import ObjectId, Binary
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 from flask_bcrypt import Bcrypt
 
 load_dotenv()
@@ -28,6 +30,50 @@ def get_client():
 
 def conectar_db():
     return get_client()[os.getenv("MONGO_DB", "projeto3")]
+
+
+TAMANHO_MAXIMO_MIDIA_POSTAGEM = 8 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = TAMANHO_MAXIMO_MIDIA_POSTAGEM + 256 * 1024
+
+
+@app.errorhandler(413)
+def requisicao_muito_grande(_erro):
+    return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
+
+
+def serializar_postagem(postagem):
+    postagem = dict(postagem)
+    postagem["id"] = str(postagem.pop("_id"))
+    if isinstance(postagem.get("usuario_id"), ObjectId):
+        postagem["usuario_id"] = str(postagem["usuario_id"])
+    midia = postagem.get("midia")
+    if isinstance(midia, dict):
+        midia = dict(midia)
+        midia.pop("dados", None)
+        postagem["midia"] = midia
+    return postagem
+
+
+def obter_usuario_da_postagem(username):
+    usuario = conectar_db()["tbl_testes"].find_one(
+        {"username": username},
+        {"_id": 1, "papel": 1},
+    )
+    return usuario
+
+
+def validar_dados_postagem(dados):
+    for campo in ("titulo", "descricao"):
+        valor = dados.get(campo)
+        if not isinstance(valor, str) or not valor.strip():
+            return campo
+    return None
+
+
+def buscar_postagem_por_id(colecao, postagem_id, projecao=None):
+    if not ObjectId.is_valid(postagem_id):
+        return None
+    return colecao.find_one({"_id": ObjectId(postagem_id)}, projecao)
 
 def usuario_ou_admin_required(func):
 
@@ -725,6 +771,181 @@ def criar_admin():
             "mensagem": "Admin criado com sucesso",
             "usuario": novo_admin["username"],
         }),201
+
+def verificar_permissao_postagem(usuario_id):
+    username = get_jwt_identity()
+    usuario = obter_usuario_da_postagem(username)
+    if usuario is None:
+        return None, (jsonify({"erro": "Usuário não encontrado"}), 401)
+
+    if usuario.get("papel") != "admin" and usuario.get("_id") != usuario_id:
+        return None, (jsonify({"erro": "Acesso negado"}), 403)
+    return usuario, None
+
+
+@app.route("/postagens", methods=["POST"])
+@jwt_required()
+def criar_postagem():
+    if request.is_json:
+        return jsonify({"erro": "Envie titulo, descricao e midia como multipart/form-data"}), 400
+
+    dados = request.form
+    arquivo = request.files.get("midia")
+    campos_faltantes = [campo for campo in ("titulo", "descricao") if campo not in dados]
+    if arquivo is None or not arquivo.filename:
+        campos_faltantes.append("midia")
+    if campos_faltantes:
+        return jsonify({
+            "erro": "Campos obrigatórios ausentes",
+            "campos_faltantes": campos_faltantes,
+        }), 400
+
+    campo_invalido = validar_dados_postagem(dados)
+    if campo_invalido:
+        return jsonify({"erro": f"Valor inválido para {campo_invalido}"}), 422
+
+    conteudo = arquivo.read(TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1)
+    if not conteudo:
+        return jsonify({"erro": "O arquivo de mídia está vazio"}), 422
+    if len(conteudo) > TAMANHO_MAXIMO_MIDIA_POSTAGEM:
+        return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
+
+    usuario = obter_usuario_da_postagem(get_jwt_identity())
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+
+    nome_arquivo = os.path.basename(arquivo.filename.replace("\\", "/"))
+    postagem = {
+        "usuario_id": usuario["_id"],
+        "titulo": dados["titulo"].strip(),
+        "descricao": dados["descricao"].strip(),
+        "midia": {
+            "dados": Binary(conteudo),
+            "nome": nome_arquivo,
+            "tipo": arquivo.mimetype or "application/octet-stream",
+        },
+        "criada_em": datetime.now(timezone.utc),
+    }
+
+    resultado = conectar_db()["tbl_postagens"].insert_one(postagem)
+    postagem["_id"] = resultado.inserted_id
+    return jsonify({
+        "mensagem": "Postagem criada com sucesso",
+        "postagem": serializar_postagem(postagem),
+    }), 201
+
+
+@app.route("/postagens", methods=["GET"])
+def listar_postagens():
+    postagens = conectar_db()["tbl_postagens"].find({}, {"midia.dados": 0})
+    return jsonify([serializar_postagem(item) for item in postagens]), 200
+
+
+@app.route("/postagens/<string:postagem_id>", methods=["GET"])
+def buscar_postagem(postagem_id):
+    postagem = buscar_postagem_por_id(
+        conectar_db()["tbl_postagens"], postagem_id, {"midia.dados": 0}
+    )
+    if postagem is None:
+        return jsonify({"erro": "Postagem não encontrada"}), 404
+    return jsonify(serializar_postagem(postagem)), 200
+
+
+@app.route("/postagens/<string:postagem_id>/midia", methods=["GET"])
+def buscar_midia_postagem(postagem_id):
+    postagem = buscar_postagem_por_id(conectar_db()["tbl_postagens"], postagem_id)
+    if postagem is None or not isinstance(postagem.get("midia"), dict):
+        return jsonify({"erro": "Mídia não encontrada"}), 404
+
+    midia = postagem["midia"]
+    conteudo = midia.get("dados")
+    if conteudo is None:
+        return jsonify({"erro": "Mídia não encontrada"}), 404
+
+    return send_file(
+        BytesIO(bytes(conteudo)),
+        mimetype=midia.get("tipo", "application/octet-stream"),
+        download_name=midia.get("nome", "midia"),
+        as_attachment=True,
+    )
+
+
+@app.route("/postagens/<string:postagem_id>", methods=["PATCH"])
+@jwt_required()
+def editar_postagem(postagem_id):
+    if not ObjectId.is_valid(postagem_id):
+        return jsonify({"erro": "Postagem não encontrada"}), 404
+
+    if request.is_json:
+        dados = request.get_json(silent=True)
+        arquivo = None
+    else:
+        dados = request.form.to_dict()
+        arquivo = request.files.get("midia")
+
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    campos_desconhecidos = set(dados) - {"titulo", "descricao"}
+    if campos_desconhecidos:
+        return jsonify({
+            "erro": "Campos não permitidos",
+            "campos": sorted(campos_desconhecidos),
+        }), 400
+    if not dados and (arquivo is None or not arquivo.filename):
+        return jsonify({"erro": "Envie ao menos um campo para editar"}), 400
+
+    for campo, valor in dados.items():
+        if not isinstance(valor, str) or not valor.strip():
+            return jsonify({"erro": f"Valor inválido para {campo}"}), 422
+
+    atualizacao = {campo: valor.strip() for campo, valor in dados.items()}
+    if arquivo is not None and arquivo.filename:
+        conteudo = arquivo.read(TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1)
+        if not conteudo:
+            return jsonify({"erro": "O arquivo de mídia está vazio"}), 422
+        if len(conteudo) > TAMANHO_MAXIMO_MIDIA_POSTAGEM:
+            return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
+        atualizacao["midia"] = {
+            "dados": Binary(conteudo),
+            "nome": os.path.basename(arquivo.filename.replace("\\", "/")),
+            "tipo": arquivo.mimetype or "application/octet-stream",
+        }
+
+    colecao = conectar_db()["tbl_postagens"]
+    postagem = buscar_postagem_por_id(colecao, postagem_id)
+    if postagem is None:
+        return jsonify({"erro": "Postagem não encontrada"}), 404
+
+    _, erro = verificar_permissao_postagem(postagem["usuario_id"])
+    if erro:
+        return erro
+
+    colecao.update_one(
+        {"_id": ObjectId(postagem_id)},
+        {"$set": atualizacao},
+    )
+    return jsonify({"mensagem": "Postagem atualizada com sucesso"}), 200
+
+
+@app.route("/postagens/<string:postagem_id>", methods=["DELETE"])
+@jwt_required()
+def deletar_postagem(postagem_id):
+    if not ObjectId.is_valid(postagem_id):
+        return jsonify({"erro": "Postagem não encontrada"}), 404
+
+    colecao = conectar_db()["tbl_postagens"]
+    postagem = buscar_postagem_por_id(colecao, postagem_id)
+    if postagem is None:
+        return jsonify({"erro": "Postagem não encontrada"}), 404
+
+    _, erro = verificar_permissao_postagem(postagem["usuario_id"])
+    if erro:
+        return erro
+
+    colecao.delete_one({"_id": ObjectId(postagem_id)})
+    return jsonify(), 204
+
 
 if __name__ == '__main__':
     app.run(debug=True)
