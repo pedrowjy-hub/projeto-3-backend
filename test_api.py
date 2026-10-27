@@ -85,6 +85,37 @@ def token_influenciador(monkeypatch):
         return create_access_token(identity="influenciador_1")
 
 
+def test_minha_conta_retorna_contato_da_conta_autenticada(token_usuario):
+    with patch("api.conectar_db") as conn:
+        colecao = conn.return_value["tbl_testes"]
+        dados = {"username": "rafacelduds", "email": "rafa@example.com", "contato": "11999998888", "papel": "usuario"}
+        colecao.find_one.return_value = dados
+        response = app.test_client().get(
+            "/me?username=outro_usuario", headers=cabecalho_autorizacao(token_usuario),
+        )
+        assert response.status_code == 200
+        assert response.json == dados
+        colecao.find_one.assert_called_once_with(
+            {"username": "rafacelduds"},
+            {**PROJECAO_PUBLICA, "email": 1, "contato": 1, "papel": 1},
+        )
+
+
+def test_minha_conta_sem_token():
+    with patch("api.conectar_db") as conn:
+        response = app.test_client().get("/me")
+        assert response.status_code == 401
+        conn.assert_not_called()
+
+
+def test_minha_conta_inexistente(token_usuario):
+    with patch("api.conectar_db") as conn:
+        conn.return_value["tbl_testes"].find_one.return_value = None
+        response = app.test_client().get("/me", headers=cabecalho_autorizacao(token_usuario))
+        assert response.status_code == 404
+        assert response.json == {"erro": "Usuário não encontrado"}
+
+
 def cabecalho_autorizacao(token):
     return {"Authorization": f"Bearer {token}"}
 

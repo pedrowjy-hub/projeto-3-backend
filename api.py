@@ -85,6 +85,18 @@ CAMPOS_PUBLICOS = {
     "descricao":1,
 }
 
+@app.route('/me', methods=['GET'])
+@jwt_required()
+def minha_conta():
+    usuario = conectar_db()["tbl_testes"].find_one(
+        {"username": get_jwt_identity()},
+        {**CAMPOS_PUBLICOS, "email": 1, "contato": 1, "papel": 1},
+    )
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    return jsonify(usuario), 200
+
+
 @app.route('/usuarios',methods=['GET'])
 def lista_users():
     tipo_perfil = request.args.get("tipo_perfil")
