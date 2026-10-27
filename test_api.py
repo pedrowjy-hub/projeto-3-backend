@@ -1,6 +1,8 @@
 import pytest
+from io import BytesIO
 from unittest.mock import MagicMock, call, patch
 from datetime import timedelta
+from bson import Binary, ObjectId
 from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
 
@@ -1788,3 +1790,304 @@ def test_adicionar_avaliacao_avaliador_inexistente():
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário criador não encontrado"}
         db["tbl_avaliacoes"].insert_one.assert_not_called()
+
+# Testes das rotas de postagem
+ID_USUARIO_POSTAGEM = ObjectId("507f1f77bcf86cd799439011")
+ID_OUTRO_USUARIO_POSTAGEM = ObjectId("507f1f77bcf86cd799439099")
+ID_POSTAGEM_TESTE = ObjectId("507f1f77bcf86cd799439012")
+
+
+def arquivo_midia(conteudo=b"conteudo-binario"):
+    return (BytesIO(conteudo), "video.mp4", "video/mp4")
+
+
+def dados_usuario_postagem():
+    return {"_id": ID_USUARIO_POSTAGEM, "papel": "usuario"}
+
+
+def mock_collections_postagem(db):
+    usuarios = MagicMock()
+    postagens = MagicMock()
+    db.__getitem__.side_effect = {
+        "tbl_testes": usuarios,
+        "tbl_postagens": postagens,
+    }.__getitem__
+    return usuarios, postagens
+
+
+def test_criar_postagem_sucesso(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        db = conectar_db.return_value
+        usuarios, postagens = mock_collections_postagem(db)
+        usuarios.find_one.return_value = dados_usuario_postagem()
+        postagens.insert_one.return_value.inserted_id = ID_POSTAGEM_TESTE
+
+        response = client.post(
+            "/postagens",
+            data={
+                "titulo": "Vídeo de campanha",
+                "descricao": "Conteúdo para a campanha de verão",
+                "midia": arquivo_midia(),
+            },
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 201
+        resultado = response.get_json()
+        assert resultado["mensagem"] == "Postagem criada com sucesso"
+        assert resultado["postagem"]["id"] == str(ID_POSTAGEM_TESTE)
+        assert resultado["postagem"]["usuario_id"] == str(ID_USUARIO_POSTAGEM)
+        assert resultado["postagem"]["titulo"] == "Vídeo de campanha"
+        assert resultado["postagem"]["descricao"] == "Conteúdo para a campanha de verão"
+        assert resultado["postagem"]["midia"] == {
+            "nome": "video.mp4",
+            "tipo": "video/mp4",
+        }
+        assert "criada_em" in resultado["postagem"]
+
+        postagem = postagens.insert_one.call_args.args[0]
+        assert postagem["usuario_id"] == ID_USUARIO_POSTAGEM
+        assert postagem["midia"]["dados"] == Binary(b"conteudo-binario")
+        assert postagem["midia"]["tipo"] == "video/mp4"
+
+
+def test_criar_postagem_sem_token(client):
+    response = client.post(
+        "/postagens",
+        data={"titulo": "Título", "descricao": "Descrição", "midia": arquivo_midia()},
+    )
+
+    assert response.status_code == 401
+
+
+def test_criar_postagem_campos_obrigatorios_ausentes(client, token_usuario):
+    response = client.post(
+        "/postagens",
+        data={"titulo": "Post sem mídia"},
+        headers=cabecalho_autorizacao(token_usuario),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "erro": "Campos obrigatórios ausentes",
+        "campos_faltantes": ["descricao", "midia"],
+    }
+
+
+@pytest.mark.parametrize("campo", ["titulo", "descricao"])
+def test_criar_postagem_rejeita_campo_vazio(client, token_usuario, campo):
+    dados = {
+        "titulo": "Título",
+        "descricao": "Descrição",
+        "midia": arquivo_midia(),
+    }
+    dados[campo] = "  "
+
+    response = client.post(
+        "/postagens",
+        data=dados,
+        headers=cabecalho_autorizacao(token_usuario),
+    )
+
+    assert response.status_code == 422
+    assert response.get_json() == {"erro": f"Valor inválido para {campo}"}
+
+
+def test_criar_postagem_usuario_inexistente(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        usuarios, postagens = mock_collections_postagem(conectar_db.return_value)
+        usuarios.find_one.return_value = None
+
+        response = client.post(
+            "/postagens",
+            data={
+                "titulo": "Título",
+                "descricao": "Descrição",
+                "midia": arquivo_midia(),
+            },
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 401
+        assert response.get_json() == {"erro": "Usuário não encontrado"}
+        postagens.insert_one.assert_not_called()
+
+
+def test_listar_postagens_sucesso_sem_binario(client):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find.return_value = [{
+            "_id": ID_POSTAGEM_TESTE,
+            "usuario_id": ID_USUARIO_POSTAGEM,
+            "titulo": "Post público",
+            "descricao": "Descrição",
+            "midia": {
+                "dados": Binary(b"conteudo"),
+                "nome": "foto.png",
+                "tipo": "image/png",
+            },
+        }]
+
+        response = client.get("/postagens")
+
+        assert response.status_code == 200
+        assert response.get_json() == [{
+            "id": str(ID_POSTAGEM_TESTE),
+            "usuario_id": str(ID_USUARIO_POSTAGEM),
+            "titulo": "Post público",
+            "descricao": "Descrição",
+            "midia": {"nome": "foto.png", "tipo": "image/png"},
+        }]
+        conectar_db.return_value["tbl_postagens"].find.assert_called_once_with(
+            {}, {"midia.dados": 0}
+        )
+
+
+def test_buscar_postagem_sucesso(client):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find_one.return_value = {
+            "_id": ID_POSTAGEM_TESTE,
+            "usuario_id": ID_USUARIO_POSTAGEM,
+            "titulo": "Post público",
+            "descricao": "Descrição",
+            "midia": {"dados": Binary(b"conteudo"), "nome": "foto.png", "tipo": "image/png"},
+        }
+
+        response = client.get(f"/postagens/{ID_POSTAGEM_TESTE}")
+
+        assert response.status_code == 200
+        assert response.get_json()["id"] == str(ID_POSTAGEM_TESTE)
+        assert "dados" not in response.get_json()["midia"]
+        conectar_db.return_value["tbl_postagens"].find_one.assert_called_once_with(
+            {"_id": ID_POSTAGEM_TESTE}, {"midia.dados": 0}
+        )
+
+
+@pytest.mark.parametrize("postagem_id", ["id-invalido", "507f1f77bcf86cd799439099"])
+def test_buscar_postagem_inexistente(client, postagem_id):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find_one.return_value = None
+
+        response = client.get(f"/postagens/{postagem_id}")
+
+        assert response.status_code == 404
+        assert response.get_json() == {"erro": "Postagem não encontrada"}
+
+
+def test_buscar_midia_postagem_sucesso(client):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find_one.return_value = {
+            "_id": ID_POSTAGEM_TESTE,
+            "midia": {
+                "dados": Binary(b"imagem-binaria"),
+                "nome": "foto.png",
+                "tipo": "image/png",
+            },
+        }
+
+        response = client.get(f"/postagens/{ID_POSTAGEM_TESTE}/midia")
+
+        assert response.status_code == 200
+        assert response.data == b"imagem-binaria"
+        assert response.mimetype == "image/png"
+        assert "attachment" in response.headers["Content-Disposition"]
+
+
+def test_buscar_midia_postagem_inexistente(client):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find_one.return_value = None
+
+        response = client.get(f"/postagens/{ID_POSTAGEM_TESTE}/midia")
+
+        assert response.status_code == 404
+        assert response.get_json() == {"erro": "Mídia não encontrada"}
+
+
+def test_editar_postagem_sucesso(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        db = conectar_db.return_value
+        usuarios, postagens = mock_collections_postagem(db)
+        postagens.find_one.return_value = {
+            "_id": ID_POSTAGEM_TESTE,
+            "usuario_id": ID_USUARIO_POSTAGEM,
+        }
+        usuarios.find_one.return_value = dados_usuario_postagem()
+
+        response = client.patch(
+            f"/postagens/{ID_POSTAGEM_TESTE}",
+            json={"titulo": "Título atualizado"},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 200
+        assert response.get_json() == {"mensagem": "Postagem atualizada com sucesso"}
+        postagens.update_one.assert_called_once_with(
+            {"_id": ID_POSTAGEM_TESTE},
+            {"$set": {"titulo": "Título atualizado"}},
+        )
+
+
+def test_editar_postagem_de_outro_usuario_negado(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        db = conectar_db.return_value
+        usuarios, postagens = mock_collections_postagem(db)
+        postagens.find_one.return_value = {
+            "_id": ID_POSTAGEM_TESTE,
+            "usuario_id": ID_OUTRO_USUARIO_POSTAGEM,
+        }
+        usuarios.find_one.return_value = dados_usuario_postagem()
+
+        response = client.patch(
+            f"/postagens/{ID_POSTAGEM_TESTE}",
+            json={"titulo": "Tentativa de alteração"},
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 403
+        assert response.get_json() == {"erro": "Acesso negado"}
+        postagens.update_one.assert_not_called()
+
+
+def test_editar_postagem_sem_campos(client, token_usuario):
+    response = client.patch(
+        f"/postagens/{ID_POSTAGEM_TESTE}",
+        json={},
+        headers=cabecalho_autorizacao(token_usuario),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"erro": "Envie ao menos um campo para editar"}
+
+
+def test_deletar_postagem_sucesso(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        db = conectar_db.return_value
+        usuarios, postagens = mock_collections_postagem(db)
+        postagens.find_one.return_value = {
+            "_id": ID_POSTAGEM_TESTE,
+            "usuario_id": ID_USUARIO_POSTAGEM,
+        }
+        usuarios.find_one.return_value = dados_usuario_postagem()
+
+        response = client.delete(
+            f"/postagens/{ID_POSTAGEM_TESTE}",
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 204
+        postagens.delete_one.assert_called_once_with(
+            {"_id": ID_POSTAGEM_TESTE}
+        )
+
+
+def test_deletar_postagem_inexistente(client, token_usuario):
+    with patch("api.conectar_db") as conectar_db:
+        conectar_db.return_value["tbl_postagens"].find_one.return_value = None
+
+        response = client.delete(
+            f"/postagens/{ID_POSTAGEM_TESTE}",
+            headers=cabecalho_autorizacao(token_usuario),
+        )
+
+        assert response.status_code == 404
+        assert response.get_json() == {"erro": "Postagem não encontrada"}
+        conectar_db.return_value["tbl_postagens"].delete_one.assert_not_called()
