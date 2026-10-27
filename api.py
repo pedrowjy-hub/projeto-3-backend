@@ -495,7 +495,7 @@ def obter_usuario_participante(id_influenciador, id_empresa):
     return username_logado, None
 
 def buscar_chat(id_influenciador, id_empresa):
-    return conectar_db()["chats"].find_one(
+    return conectar_db()["tbl_chats"].find_one(
         {
             "id_influenciador": id_influenciador,
             "id_empresa": id_empresa,
@@ -533,7 +533,7 @@ def criar_chat():
     if erro:
         return erro
 
-    colecao = conectar_db()["chats"]
+    colecao = conectar_db()["tbl_chats"]
     filtro = {
         "id_influenciador": dados["id_influenciador"],
         "id_empresa": dados["id_empresa"],
@@ -584,7 +584,7 @@ def enviar_mensagem(id_influenciador, id_empresa):
         "id_influenciador": id_influenciador,
         "id_empresa": id_empresa,
     }
-    resultado = conectar_db()["chats"].update_one(
+    resultado = conectar_db()["trap_chats"].update_one(
         filtro,
         {"$push": {"conversa": mensagem}},
     )
@@ -624,7 +624,7 @@ def adicionar_arquivo(id_influenciador, id_empresa):
         "id_influenciador": id_influenciador,
         "id_empresa": id_empresa,
     }
-    resultado = conectar_db()["chats"].update_one(
+    resultado = conectar_db()["tbl_chats"].update_one(
         filtro,
         {"$push": {"arquivos": dados}},
     )
