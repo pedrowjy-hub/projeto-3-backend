@@ -33,12 +33,13 @@ def conectar_db():
 
 
 TAMANHO_MAXIMO_MIDIA_POSTAGEM = 8 * 1024 * 1024
-app.config["MAX_CONTENT_LENGTH"] = TAMANHO_MAXIMO_MIDIA_POSTAGEM + 256 * 1024
+MAXIMO_ARQUIVOS_POSTAGEM = 3
+app.config["MAX_CONTENT_LENGTH"] = MAXIMO_ARQUIVOS_POSTAGEM * TAMANHO_MAXIMO_MIDIA_POSTAGEM + 256 * 1024
 
 
 @app.errorhandler(413)
 def requisicao_muito_grande(_erro):
-    return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
+    return jsonify({"erro": "Envie até três arquivos de no máximo 8 MB cada"}), 413
 
 
 def serializar_postagem(postagem):
@@ -52,6 +53,47 @@ def serializar_postagem(postagem):
         midia.pop("dados", None)
         postagem["midia"] = midia
     return postagem
+
+
+def ler_midias_postagem(arquivos):
+    if len(arquivos) > MAXIMO_ARQUIVOS_POSTAGEM:
+        return None, (jsonify({"erro": "Adicione no máximo três arquivos por postagem"}), 400)
+    midias = []
+    for arquivo in arquivos:
+        conteudo = arquivo.read(TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1)
+        if not arquivo.filename or not conteudo:
+            return None, (jsonify({"erro": "O arquivo de mídia está vazio"}), 422)
+        if len(conteudo) > TAMANHO_MAXIMO_MIDIA_POSTAGEM:
+            return None, (jsonify({"erro": "Cada arquivo deve ter no máximo 8 MB"}), 413)
+        midias.append({
+            "dados": Binary(conteudo),
+            "nome": os.path.basename(arquivo.filename.replace(chr(92), "/")),
+            "tipo": arquivo.mimetype or "application/octet-stream",
+        })
+    return midias, None
+
+
+def salvar_midias_extras(midias, postagem_id):
+    # Cada documento fica abaixo de 16 MB, mesmo com três arquivos de 8 MB.
+    metadados = [{"nome": item["nome"], "tipo": item["tipo"]} for item in midias]
+    extras = []
+    for indice, item in enumerate(midias[1:], 1):
+        arquivo_id = ObjectId()
+        extras.append({"_id": arquivo_id, "postagem_id": postagem_id, **item})
+        metadados[indice]["id"] = str(arquivo_id)
+    if extras:
+        try:
+            conectar_db()["tbl_midias_postagens"].insert_many(extras)
+        except Exception:
+            remover_midias_extras(metadados)
+            raise
+    return metadados
+
+
+def remover_midias_extras(midias):
+    ids = [ObjectId(item["id"]) for item in midias if item.get("id")]
+    if ids:
+        conectar_db()["tbl_midias_postagens"].delete_many({"_id": {"$in": ids}})
 
 
 def obter_usuario_da_postagem(username):
@@ -790,9 +832,9 @@ def criar_postagem():
         return jsonify({"erro": "Envie titulo, descricao e midia como multipart/form-data"}), 400
 
     dados = request.form
-    arquivo = request.files.get("midia")
+    arquivos = request.files.getlist("midia")
     campos_faltantes = [campo for campo in ("titulo", "descricao") if campo not in dados]
-    if arquivo is None or not arquivo.filename:
+    if not arquivos or not any(arquivo.filename for arquivo in arquivos):
         campos_faltantes.append("midia")
     if campos_faltantes:
         return jsonify({
@@ -804,30 +846,31 @@ def criar_postagem():
     if campo_invalido:
         return jsonify({"erro": f"Valor inválido para {campo_invalido}"}), 422
 
-    conteudo = arquivo.read(TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1)
-    if not conteudo:
-        return jsonify({"erro": "O arquivo de mídia está vazio"}), 422
-    if len(conteudo) > TAMANHO_MAXIMO_MIDIA_POSTAGEM:
-        return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
+    midias, erro = ler_midias_postagem(arquivos)
+    if erro:
+        return erro
 
     usuario = obter_usuario_da_postagem(get_jwt_identity())
     if usuario is None:
         return jsonify({"erro": "Usuário não encontrado"}), 401
 
-    nome_arquivo = os.path.basename(arquivo.filename.replace("\\", "/"))
+    postagem_id = ObjectId()
+    metadados = salvar_midias_extras(midias, postagem_id)
     postagem = {
+        "_id": postagem_id,
         "usuario_id": usuario["_id"],
         "titulo": dados["titulo"].strip(),
         "descricao": dados["descricao"].strip(),
-        "midia": {
-            "dados": Binary(conteudo),
-            "nome": nome_arquivo,
-            "tipo": arquivo.mimetype or "application/octet-stream",
-        },
+        "midia": midias[0],
+        "midias": metadados,
         "criada_em": datetime.now(timezone.utc),
     }
 
-    resultado = conectar_db()["tbl_postagens"].insert_one(postagem)
+    try:
+        resultado = conectar_db()["tbl_postagens"].insert_one(postagem)
+    except Exception:
+        remover_midias_extras(metadados)
+        raise
     postagem["_id"] = resultado.inserted_id
     return jsonify({
         "mensagem": "Postagem criada com sucesso",
@@ -837,8 +880,22 @@ def criar_postagem():
 
 @app.route("/postagens", methods=["GET"])
 def listar_postagens():
-    postagens = conectar_db()["tbl_postagens"].find({}, {"midia.dados": 0})
-    return jsonify([serializar_postagem(item) for item in postagens]), 200
+    db = conectar_db()
+    postagens = list(db["tbl_postagens"].find({}, {"midia.dados": 0}))
+    ids_autores = list({item["usuario_id"] for item in postagens if item.get("usuario_id")})
+    autores = {
+        str(usuario["_id"]): {
+            campo: usuario.get(campo) for campo in ("nome", "username", "tipo_perfil")
+        }
+        for usuario in db["tbl_usuarios"].find(
+            {"_id": {"$in": ids_autores}},
+            {"_id": 1, "nome": 1, "username": 1, "tipo_perfil": 1},
+        )
+    } if ids_autores else {}
+    return jsonify([
+        {**serializar_postagem(item), "autor": autores.get(str(item.get("usuario_id")))}
+        for item in postagens
+    ]), 200
 
 
 @app.route("/postagens/<string:postagem_id>", methods=["GET"])
@@ -852,12 +909,24 @@ def buscar_postagem(postagem_id):
 
 
 @app.route("/postagens/<string:postagem_id>/midia", methods=["GET"])
-def buscar_midia_postagem(postagem_id):
+@app.route("/postagens/<string:postagem_id>/midia/<int:indice>", methods=["GET"])
+def buscar_midia_postagem(postagem_id, indice=0):
     postagem = buscar_postagem_por_id(conectar_db()["tbl_postagens"], postagem_id)
     if postagem is None or not isinstance(postagem.get("midia"), dict):
         return jsonify({"erro": "Mídia não encontrada"}), 404
 
-    midia = postagem["midia"]
+    if indice == 0:
+        midia = postagem["midia"]
+    else:
+        midias = postagem.get("midias", [])
+        if indice >= len(midias) or not midias[indice].get("id"):
+            return jsonify({"erro": "Mídia não encontrada"}), 404
+        midia = conectar_db()["tbl_midias_postagens"].find_one({
+            "_id": ObjectId(midias[indice]["id"]),
+            "postagem_id": ObjectId(postagem_id),
+        })
+        if midia is None:
+            return jsonify({"erro": "Mídia não encontrada"}), 404
     conteudo = midia.get("dados")
     if conteudo is None:
         return jsonify({"erro": "Mídia não encontrada"}), 404
@@ -878,10 +947,10 @@ def editar_postagem(postagem_id):
 
     if request.is_json:
         dados = request.get_json(silent=True)
-        arquivo = None
+        arquivos = []
     else:
         dados = request.form.to_dict()
-        arquivo = request.files.get("midia")
+        arquivos = request.files.getlist("midia")
 
     if not isinstance(dados, dict):
         return jsonify({"erro": "JSON inválido"}), 400
@@ -892,7 +961,7 @@ def editar_postagem(postagem_id):
             "erro": "Campos não permitidos",
             "campos": sorted(campos_desconhecidos),
         }), 400
-    if not dados and (arquivo is None or not arquivo.filename):
+    if not dados and not arquivos:
         return jsonify({"erro": "Envie ao menos um campo para editar"}), 400
 
     for campo, valor in dados.items():
@@ -900,17 +969,11 @@ def editar_postagem(postagem_id):
             return jsonify({"erro": f"Valor inválido para {campo}"}), 422
 
     atualizacao = {campo: valor.strip() for campo, valor in dados.items()}
-    if arquivo is not None and arquivo.filename:
-        conteudo = arquivo.read(TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1)
-        if not conteudo:
-            return jsonify({"erro": "O arquivo de mídia está vazio"}), 422
-        if len(conteudo) > TAMANHO_MAXIMO_MIDIA_POSTAGEM:
-            return jsonify({"erro": "A mídia deve ter no máximo 8 MB"}), 413
-        atualizacao["midia"] = {
-            "dados": Binary(conteudo),
-            "nome": os.path.basename(arquivo.filename.replace("\\", "/")),
-            "tipo": arquivo.mimetype or "application/octet-stream",
-        }
+    midias = None
+    if arquivos:
+        midias, erro = ler_midias_postagem(arquivos)
+        if erro:
+            return erro
 
     colecao = conectar_db()["tbl_postagens"]
     postagem = buscar_postagem_por_id(colecao, postagem_id)
@@ -921,10 +984,20 @@ def editar_postagem(postagem_id):
     if erro:
         return erro
 
-    colecao.update_one(
-        {"_id": ObjectId(postagem_id)},
-        {"$set": atualizacao},
-    )
+    if midias:
+        atualizacao["midia"] = midias[0]
+        atualizacao["midias"] = salvar_midias_extras(midias, ObjectId(postagem_id))
+    try:
+        colecao.update_one(
+            {"_id": ObjectId(postagem_id)},
+            {"$set": atualizacao},
+        )
+    except Exception:
+        if midias:
+            remover_midias_extras(atualizacao["midias"])
+        raise
+    if midias:
+        remover_midias_extras(postagem.get("midias", []))
     return jsonify({"mensagem": "Postagem atualizada com sucesso"}), 200
 
 
@@ -944,6 +1017,7 @@ def deletar_postagem(postagem_id):
         return erro
 
     colecao.delete_one({"_id": ObjectId(postagem_id)})
+    remover_midias_extras(postagem.get("midias", []))
     return jsonify(), 204
 
 
