@@ -90,7 +90,8 @@ def token_influenciador(monkeypatch):
 def test_minha_conta_retorna_contato_da_conta_autenticada(token_usuario):
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value["tbl_testes"]
-        dados = {"username": "rafacelduds", "email": "rafa@example.com", "contato": "11999998888", "papel": "usuario"}
+        dados = {"username": "rafacelduds", "email": "rafa@example.com", "contato": "11999998888", "papel": "usuario",
+                 "assinatura": True, "expiracao_assinatura": "27-11-2026"}
         colecao.find_one.return_value = dados
         response = app.test_client().get(
             "/me?username=outro_usuario", headers=cabecalho_autorizacao(token_usuario),
@@ -99,7 +100,8 @@ def test_minha_conta_retorna_contato_da_conta_autenticada(token_usuario):
         assert response.json == dados
         colecao.find_one.assert_called_once_with(
             {"username": "rafacelduds"},
-            {**PROJECAO_PUBLICA, "email": 1, "contato": 1, "papel": 1},
+            {**PROJECAO_PUBLICA, "email": 1, "contato": 1, "papel": 1,
+             "assinatura": 1, "expiracao_assinatura": 1},
         )
 
 
@@ -337,7 +339,7 @@ def test_admin_acesso_permitido(client, token_admin):
         assert response.json == {
             "mensagem": "Acesso concedido, bem-vindo chefe"
         }
-        conn.return_value.__getitem__.assert_called_once_with("tbl_testes")
+        conn.return_value.__getitem__.assert_called_once_with("tbl_usuarios")
         colecao.find_one.assert_called_once_with(
             {"username": "testeadmin"}, {"_id": 0}
         )
@@ -1402,7 +1404,10 @@ def test_login_identificador_vazio(client):
 
 
 CHAT_URL = "/chats/influenciador_1/empresa_1"
-CHAT_PARTICIPANTE = {"username": "influenciador_1"}
+CHAT_PARTICIPANTE = {
+    "username": "influenciador_1", "assinatura": True,
+    "expiracao_assinatura": "31-12-2099",
+}
 
 
 @patch("api.conectar_db")
