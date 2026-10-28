@@ -10,7 +10,7 @@ from flask_jwt_extended import (
 from pymongo import MongoClient
 from bson import ObjectId, Binary
 from dotenv import load_dotenv
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask_bcrypt import Bcrypt
 
 load_dotenv()
@@ -178,7 +178,8 @@ CAMPOS_PUBLICOS = {
 def minha_conta():
     usuario = conectar_db()["tbl_usuarios"].find_one(
         {"username": get_jwt_identity()},
-        {**CAMPOS_PUBLICOS, "email": 1, "contato": 1, "papel": 1},
+        {**CAMPOS_PUBLICOS, "email": 1, "contato": 1, "papel": 1,
+         "assinatura": 1, "expiracao_assinatura": 1},
     )
     if usuario is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
@@ -521,11 +522,26 @@ def login():
                                 additional_claims={"email":usuario["email"]})
     return jsonify(access_token = token),200
 
+def assinatura_premium_ativa(usuario, hoje=None):
+    if usuario.get("assinatura") is not True:
+        return False
+    expiracao = usuario.get("expiracao_assinatura")
+    if not isinstance(expiracao, str) or not re.fullmatch(r"\d{2}-\d{2}-\d{4}", expiracao):
+        return False
+    try:
+        validade = datetime.strptime(expiracao, "%d-%m-%Y").date()
+    except ValueError:
+        return False
+    # A validade inclui todo o último dia no horário de Brasília.
+    hoje = hoje or datetime.now(timezone(timedelta(hours=-3))).date()
+    return validade >= hoje
+
+
 def obter_usuario_participante(id_influenciador, id_empresa):
     username_logado = get_jwt_identity()
     usuario_logado = conectar_db()["tbl_usuarios"].find_one(
         {"username": username_logado},
-        {"_id": 0, "username": 1},
+        {"_id": 0, "username": 1, "assinatura": 1, "expiracao_assinatura": 1},
     )
 
     if usuario_logado is None:
@@ -533,6 +549,12 @@ def obter_usuario_participante(id_influenciador, id_empresa):
 
     if username_logado not in {id_influenciador, id_empresa}:
         return None, (jsonify({"erro": "Acesso Negado"}), 403)
+
+    if not assinatura_premium_ativa(usuario_logado):
+        return None, (jsonify({
+            "erro": "O chat é exclusivo para usuários com assinatura Premium ativa.",
+            "codigo": "premium_necessario",
+        }), 403)
 
     return username_logado, None
 
@@ -626,7 +648,7 @@ def enviar_mensagem(id_influenciador, id_empresa):
         "id_influenciador": id_influenciador,
         "id_empresa": id_empresa,
     }
-    resultado = conectar_db()["trap_chats"].update_one(
+    resultado = conectar_db()["tbl_chats"].update_one(
         filtro,
         {"$push": {"conversa": mensagem}},
     )
