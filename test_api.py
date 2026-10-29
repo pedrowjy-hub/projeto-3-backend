@@ -1171,7 +1171,8 @@ def test_editar_user_por_admin(token_admin):
             {"$set": {"nome": "Rafael"}},
         )
 
-def test_alterar_assinatura(token_usuario):
+def test_alterar_assinatura(token_usuario, monkeypatch):
+    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
 
@@ -1202,7 +1203,8 @@ def test_alterar_assinatura(token_usuario):
             {"$set": dados}
         )
 
-def test_alterar_assinatura_sem_expiracao_400(token_usuario):
+def test_alterar_assinatura_sem_expiracao_400(token_usuario, monkeypatch):
+    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     with patch('api.conectar_db') as conn:
         colecao = conn.return_value.__getitem__.return_value
 
@@ -1216,7 +1218,8 @@ def test_alterar_assinatura_sem_expiracao_400(token_usuario):
         assert response.json == {"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}
         colecao.update_one.assert_not_called()
 
-def test_desativar_assinatura(token_usuario):
+def test_desativar_assinatura(token_usuario, monkeypatch):
+    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     with patch("api.conectar_db") as conn:
         colecao = conn.return_value.__getitem__.return_value
         colecao.find_one.return_value = {

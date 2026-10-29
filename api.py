@@ -8,6 +8,9 @@ from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
+from uuid import uuid4
+from pagamentos import ErroPagamento, configuracao_paddle, requisitar_paddle, validar_preco, validar_transacao
 from bson import ObjectId, Binary
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
@@ -428,6 +431,76 @@ def editar_user(username):
 
     return jsonify({"mensagem": "Usuário atualizado com sucesso"}), 200
 
+@app.route("/usuarios/me/assinatura/checkout", methods=["POST"])
+@jwt_required()
+def criar_checkout_assinatura():
+    dados = request.get_json(silent=True)
+    if request.data and dados != {}:
+        return jsonify({"erro": "O checkout não aceita preço, usuário ou validade enviados pelo cliente."}), 400
+    username = get_jwt_identity()
+    db = conectar_db()
+    usuario = db["tbl_usuarios"].find_one({"username": username}, {"_id": 0})
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if usuario.get("papel") != "usuario" or usuario.get("tipo_perfil") not in TIPO_PERFIL:
+        return jsonify({"erro": "Checkout disponível somente para empresas e influenciadores."}), 403
+    if assinatura_premium_ativa(usuario):
+        return jsonify({"erro": "Sua assinatura Premium já está ativa."}), 409
+
+    checkouts = db["tbl_checkout_pagamentos"]
+    referencia = str(uuid4())
+    reservado = False
+    try:
+        _, token, preco_id = configuracao_paddle()
+        existente = checkouts.find_one({"_id": username})
+        if existente:
+            transacao_id = existente.get("transaction_id")
+            if not transacao_id:
+                return jsonify({"erro": "Há um checkout em preparação ou aguardando conferência. Não crie outra assinatura."}), 409
+            if not re.fullmatch(r"txn_[a-z0-9]{26}", transacao_id):
+                raise ErroPagamento("O registro do checkout precisa ser conferido.")
+            transacao = requisitar_paddle("GET", f"/transactions/{transacao_id}")
+            validar_transacao(transacao, username, preco_id)
+            if transacao.get("status") in ("draft", "ready"):
+                return jsonify({"environment": "sandbox", "transaction_id": transacao_id,
+                                "client_token": token, "reused": True}), 200
+            if transacao.get("status") != "canceled":
+                return jsonify({"erro": "Este checkout já foi processado. A confirmação do Premium aguarda a integração dos webhooks."}), 409
+            checkouts.delete_one({"_id": username, "transaction_id": transacao_id})
+
+        validar_preco(preco_id)
+        try:
+            checkouts.insert_one({"_id": username, "reference": referencia,
+                                  "status": "creating", "environment": "sandbox",
+                                  "price_id": preco_id, "created_at": datetime.now(timezone.utc)})
+        except DuplicateKeyError:
+            return jsonify({"erro": "Um checkout já está sendo preparado. Tente novamente em instantes."}), 409
+        reservado = True
+        transacao = requisitar_paddle("POST", "/transactions", {
+            "items": [{"price_id": preco_id, "quantity": 1}],
+            "collection_mode": "automatic", "currency_code": "BRL",
+            "custom_data": {"username": username, "checkout_reference": referencia},
+        })
+        # Salve o ID antes de outras validações para permitir conferência sem duplicar compras.
+        transacao_id = transacao.get("id")
+        checkouts.update_one({"_id": username, "reference": referencia},
+                             {"$set": {"transaction_id": transacao_id, "status": "pending"}})
+        reservado = False
+        validar_transacao(transacao, username, preco_id)
+        if transacao.get("status") not in ("draft", "ready"):
+            raise ErroPagamento("O checkout de teste não está disponível para abertura.")
+        return jsonify({"environment": "sandbox", "transaction_id": transacao_id,
+                        "client_token": token, "reused": False}), 201
+    except ErroPagamento as erro:
+        if reservado:
+            filtro = {"_id": username, "reference": referencia}
+            if erro.resultado_incerto:
+                checkouts.update_one(filtro, {"$set": {"status": "needs_review"}})
+            else:
+                checkouts.delete_one(filtro)
+        return jsonify({"erro": str(erro)}), erro.status
+
+
 @app.route("/usuarios/<string:username>/assinatura", methods=['PATCH'])
 @jwt_required()
 def alterar_assinatura(username):
@@ -435,6 +508,9 @@ def alterar_assinatura(username):
 
     if username_logado != username:
         return jsonify({"erro":"Acesso Negado"}),403
+
+    if os.getenv("PADDLE_API_KEY"):
+        return jsonify({"erro": "A alteração manual está desabilitada. Use o checkout de sandbox. O cancelamento pelo Paddle ainda está em construção."}), 409
         
     dados = request.get_json(silent=True)
 
