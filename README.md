@@ -48,3 +48,54 @@ endpoint de fechamento deverá reutilizar `assinatura_premium_ativa` e validar a
 participação e a assinatura de cada usuário que realizar uma ação no contrato.
 Análises, destaque nas buscas e consulta de comentários de empresas permanecem
 benefícios planejados, sinalizados como em construção na página de planos.
+
+## Análises públicas do YouTube
+
+O backend oferece três endpoints autenticados para a primeira integração de
+análise de influenciadores:
+
+- `POST /analises/youtube` recebe `{"url": "https://www.youtube.com/@canal"}`,
+  consulta os dados públicos do canal e até 10 vídeos recentes. Cada chamada
+  salva ou atualiza a captura daquele dia no MongoDB, associada ao
+  influenciador autenticado no sistema.
+- `GET /analises/youtube` retorna até 90 capturas diárias do influenciador
+  autenticado, em ordem cronológica, para alimentar gráficos.
+- `GET /analises/youtube/:username` consulta o histórico do influenciador
+  identificado pelo username. Qualquer empresa cadastrada pode consultar qualquer
+  influenciador, sem exigir Premium, vínculo ou campanha. Influenciadores podem
+  consultar somente o próprio histórico por essa rota.
+
+Envie `Authorization: Bearer <token>` em todas as rotas. Por exemplo,
+uma empresa consulta `GET /analises/youtube/duds`. As duas rotas GET retornam
+`{"plataforma": "youtube", "historico": [...]}`, com o mesmo formato de capturas,
+até 90 registros mais recentes em ordem cronológica e `coletado_em` em ISO 8601.
+As consultas leem apenas o histórico salvo e não chamam o YouTube.
+Perfil sem capturas retorna `200` com `historico: []`.
+
+Na consulta por username, token ausente/inválido ou conta autenticada removida
+impede o acesso; conta removida retorna `401`. Acesso a outro influenciador por
+um influenciador retorna `403`. Alvo inexistente ou que não seja influenciador
+retorna `404`. O GET original continua consultando somente o usuário do token.
+
+Para executar os testes locais de acesso e histórico (MongoDB simulado):
+`python -m pytest test_analises_youtube.py -q`.
+
+A autenticação associa a análise à conta do sistema, mas não comprova que o
+canal do YouTube informado pertence àquela pessoa.
+Para manter o histórico crescendo, o endpoint precisa ser chamado periodicamente;
+por enquanto, não há tarefa automática agendada.
+
+São aceitos links `youtube.com/@canal`, `youtube.com/channel/ID_DO_CANAL` e
+`youtube.com/user/usuario`. Os dados incluem inscritos (quando visíveis),
+visualizações totais, número de vídeos e visualizações/curtidas/comentários dos
+vídeos recentes. Alcance e impressões privadas não são coletados.
+
+Configure `YOUTUBE_API_KEY` no ambiente do backend (por exemplo, no `.env`, que
+não deve ser versionado):
+
+```text
+YOUTUBE_API_KEY=sua-chave-da-youtube-data-api
+```
+
+A YouTube Data API usa cotas por projeto. O endpoint faz até três consultas
+para cada análise: canal, playlist de envios e estatísticas dos vídeos.
