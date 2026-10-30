@@ -12,6 +12,8 @@ from bson import ObjectId, Binary
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from flask_bcrypt import Bcrypt
+from urllib.parse import urlparse
+import requests
 
 load_dotenv()
 app =  Flask(__name__)
@@ -35,6 +37,7 @@ def conectar_db():
 TAMANHO_MAXIMO_MIDIA_POSTAGEM = 8 * 1024 * 1024
 MAXIMO_ARQUIVOS_POSTAGEM = 3
 app.config["MAX_CONTENT_LENGTH"] = MAXIMO_ARQUIVOS_POSTAGEM * TAMANHO_MAXIMO_MIDIA_POSTAGEM + 256 * 1024
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3"
 
 
 @app.errorhandler(413)
@@ -1041,6 +1044,234 @@ def deletar_postagem(postagem_id):
     colecao.delete_one({"_id": ObjectId(postagem_id)})
     remover_midias_extras(postagem.get("midias", []))
     return jsonify(), 204
+
+
+def identificar_canal_youtube(url):
+    """Converte formatos comuns de URL de canal nos filtros da YouTube API."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+
+    valor = url.strip()
+    if "://" not in valor:
+        valor = "https://" + valor
+
+    try:
+        parsed = urlparse(valor)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        return None
+
+    partes = [parte for parte in parsed.path.split("/") if parte]
+    if not partes:
+        return None
+
+    if partes[0] == "channel" and len(partes) >= 2:
+        return {"id": partes[1]}
+    if partes[0].startswith("@") and len(partes[0]) > 1:
+        return {"forHandle": partes[0]}
+    if partes[0] == "user" and len(partes) >= 2:
+        return {"forUsername": partes[1]}
+    return None
+
+
+def consultar_youtube(endpoint, parametros):
+    chave = os.getenv("YOUTUBE_API_KEY")
+    if not chave:
+        return None, (jsonify({
+            "erro": "Integração com YouTube não configurada",
+            "detalhe": "Defina a variável de ambiente YOUTUBE_API_KEY",
+        }), 503)
+
+    try:
+        resposta = requests.get(
+            f"{YOUTUBE_API_URL}/{endpoint}",
+            params={**parametros, "key": chave},
+            timeout=10,
+        )
+        resposta.raise_for_status()
+        return resposta.json(), None
+    except requests.HTTPError as erro:
+        status = erro.response.status_code if erro.response is not None else None
+        if status in {403, 429}:
+            return None, (jsonify({
+                "erro": "Cota ou acesso da YouTube Data API indisponível"
+            }), 503)
+        return None, (jsonify({"erro": "Falha ao consultar a YouTube Data API"}), 502)
+    except requests.RequestException:
+        return None, (jsonify({"erro": "Não foi possível consultar o YouTube"}), 502)
+    except ValueError:
+        return None, (jsonify({"erro": "Resposta inválida recebida do YouTube"}), 502)
+
+
+def converter_metrica_publica(valor):
+    return int(valor) if valor is not None else None
+
+
+def obter_estatisticas_publicas_youtube(identificador):
+    canais, erro = consultar_youtube("channels", {
+        "part": "snippet,statistics,contentDetails",
+        **identificador,
+    })
+    if erro:
+        return None, erro
+
+    itens_canais = canais.get("items", [])
+    if not itens_canais:
+        return None, (jsonify({"erro": "Canal do YouTube não encontrado"}), 404)
+
+    canal = itens_canais[0]
+    snippet = canal.get("snippet", {})
+    estatisticas = canal.get("statistics", {})
+    playlist_uploads = (
+        canal.get("contentDetails", {})
+        .get("relatedPlaylists", {})
+        .get("uploads")
+    )
+
+    videos_recentes = []
+    if playlist_uploads:
+        playlist, erro = consultar_youtube("playlistItems", {
+            "part": "contentDetails",
+            "playlistId": playlist_uploads,
+            "maxResults": 10,
+        })
+        if erro:
+            return None, erro
+
+        ids_videos = [
+            item.get("contentDetails", {}).get("videoId")
+            for item in playlist.get("items", [])
+        ]
+        ids_videos = [video_id for video_id in ids_videos if video_id]
+        if ids_videos:
+            videos, erro = consultar_youtube("videos", {
+                "part": "snippet,statistics",
+                "id": ",".join(ids_videos),
+            })
+            if erro:
+                return None, erro
+
+            videos_recentes = [{
+                "id": video["id"],
+                "titulo": video.get("snippet", {}).get("title"),
+                "publicado_em": video.get("snippet", {}).get("publishedAt"),
+                "visualizacoes": converter_metrica_publica(
+                    video.get("statistics", {}).get("viewCount")
+                ),
+                "curtidas": converter_metrica_publica(
+                    video.get("statistics", {}).get("likeCount")
+                ),
+                "comentarios": converter_metrica_publica(
+                    video.get("statistics", {}).get("commentCount")
+                ),
+                "url": f"https://www.youtube.com/watch?v={video['id']}",
+            } for video in videos.get("items", [])]
+
+    inscricoes_ocultas = estatisticas.get("hiddenSubscriberCount", False)
+    return {
+        "plataforma": "youtube",
+        "perfil": {
+            "id": canal.get("id"),
+            "nome": snippet.get("title"),
+            "descricao": snippet.get("description"),
+            "url": f"https://www.youtube.com/channel/{canal.get('id')}",
+            "criado_em": snippet.get("publishedAt"),
+        },
+        "metricas": {
+            "seguidores": None if inscricoes_ocultas else converter_metrica_publica(
+                estatisticas.get("subscriberCount")
+            ),
+            "seguidores_ocultos": inscricoes_ocultas,
+            "visualizacoes_totais": converter_metrica_publica(
+                estatisticas.get("viewCount")
+            ),
+            "total_publicacoes": converter_metrica_publica(
+                estatisticas.get("videoCount")
+            ),
+        },
+        "videos_recentes": videos_recentes,
+    }, None
+
+
+@app.route("/analises/youtube", methods=["POST"])
+@jwt_required()
+def criar_analise_youtube():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    url = dados.get("url")
+    identificador = identificar_canal_youtube(url)
+    if identificador is None:
+        return jsonify({
+            "erro": "Link de canal do YouTube inválido ou não suportado",
+            "formatos_suportados": [
+                "youtube.com/@canal",
+                "youtube.com/channel/ID_DO_CANAL",
+                "youtube.com/user/usuario",
+            ],
+        }), 400
+
+    usuario = conectar_db()["tbl_usuarios"].find_one(
+        {"username": get_jwt_identity()},
+        {"_id": 0, "tipo_perfil": 1},
+    )
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if usuario.get("tipo_perfil") != "influenciador":
+        return jsonify({"erro": "Somente influenciadores podem cadastrar uma análise"}), 403
+
+    analise, erro = obter_estatisticas_publicas_youtube(identificador)
+    if erro:
+        return erro
+
+    agora = datetime.now(timezone.utc)
+    username = get_jwt_identity()
+    documento = {
+        **analise,
+        "username": username,
+        "data_referencia": agora.date().isoformat(),
+        "coletado_em": agora,
+    }
+    colecao = conectar_db()["tbl_analises_influenciadores"]
+    colecao.update_one(
+        {
+            "username": username,
+            "plataforma": "youtube",
+            "perfil.id": analise["perfil"]["id"],
+            "data_referencia": documento["data_referencia"],
+        },
+        {"$set": documento},
+        upsert=True,
+    )
+
+    documento["coletado_em"] = agora.isoformat()
+    return jsonify({"analise": documento}), 200
+
+
+@app.route("/analises/youtube", methods=["GET"])
+@jwt_required()
+def listar_historico_analises_youtube():
+    username = get_jwt_identity()
+    documentos = list(
+        conectar_db()["tbl_analises_influenciadores"].find(
+            {"username": username, "plataforma": "youtube"},
+            {"_id": 0, "username": 0},
+        ).sort("data_referencia", -1).limit(90)
+    )
+    documentos.reverse()
+    for documento in documentos:
+        coletado_em = documento.get("coletado_em")
+        if isinstance(coletado_em, datetime):
+            documento["coletado_em"] = coletado_em.isoformat()
+
+    return jsonify({
+        "plataforma": "youtube",
+        "historico": documentos,
+    }), 200
 
 
 if __name__ == '__main__':
