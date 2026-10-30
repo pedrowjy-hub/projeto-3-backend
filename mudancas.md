@@ -118,14 +118,39 @@ formato-base evita que o frontend precise de duas telas diferentes.
 Os primeiros testes devem cobrir empresa sem assinatura, empresa assinante,
 influenciador bloqueado, admin e alvo que não é influenciador.
 
-## Interfaces de chat e fluxo de contratos
+## Homologação externa dos contratos
 
-- Implementar a interface de mensagens integrada ao backend de chat existente.
-- Implementar criação e fechamento de contratos, incluindo os endpoints e a
-  interface. Validar participação e Premium ativo no backend em cada operação
-  protegida, reutilizando `assinatura_premium_ativa`.
-- Testar bloqueio de contas gratuitas ou expiradas e de usuários externos à
-  conversa ou ao contrato, além do fluxo permitido para participantes Premium.
+- Reiniciar o backend após atualizar o `.env` e confirmar que o processo em execução reconhece o Client ID. A API App, o Client ID, o domínio do frontend e o callback já foram configurados e conferidos por consulta à API.
+- Validar com duas contas Premium e e-mails próprios/autorizados: negociar pelo chat, publicar PDF, ambos revisarem/aprovarem a mesma versão, preparar a assinatura, assinar dentro do site pelos dois e baixar o PDF final. Manter exclusivamente modo de teste.
+- Confirmar recebimento dos eventos, recusa e entrega repetida no serviço real.
+- Evoluções futuras: paginação do histórico, cancelamento/expiração de solicitações na interface e tratamento completo de cancelamentos feitos no painel externo.
+
+Chat, vínculo obrigatório à conversa, aprovação por participante e assinatura incorporada já estão implementados localmente. Detalhes e limites em `CONTRATOS.md`. Falta concluir a homologação externa no navegador e confirmar a entrega dos eventos.
+
+## Sessões independentes por aba
+
+Atualmente o token `access_token` fica no `localStorage`, compartilhado entre
+abas e janelas da mesma origem no mesmo perfil de navegador. Entrar em outra
+conta substitui a sessão usada pelas demais abas.
+
+- Centralizar o acesso ao token em um serviço de sessão e armazená-lo no
+  `sessionStorage`, atualizando login, logout, chamadas autenticadas e validações
+  de sessão em todas as telas e componentes.
+- Deixar de usar o token antigo do `localStorage`, sem migrá-lo automaticamente
+  para todas as abas. Solicitar novo login quando necessário.
+- Ajustar o provedor de aparência para identificar a conta pela sessão da aba.
+  Manter as preferências e seus caches vinculados ao usuário; apenas a sessão
+  de autenticação deve ser isolada por aba.
+- Garantir que respostas e operações pendentes da conta anterior não atualizem
+  a interface após troca de conta ou logout na mesma aba.
+- Testar empresa e influenciador simultaneamente: login e logout em uma aba não
+  devem trocar ou encerrar a conta da outra; mensagens, contratos e preferências
+  devem usar a identidade correta. Recarregar a aba deve preservar sua sessão.
+- Conferir também abas duplicadas: o navegador pode copiar inicialmente o
+  `sessionStorage`, mas logins posteriores devem permanecer independentes.
+
+Até essa implementação, testar duas contas usando perfis de navegador separados
+ou uma janela normal e outra anônima. Essa alteração ainda não foi implementada.
 
 ## Configuração de deploy
 

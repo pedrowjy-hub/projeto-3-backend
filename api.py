@@ -1564,5 +1564,10 @@ def responder_historico_youtube(username):
     }), 200
 
 
+from contratos import registrar_contratos
+from conversas import registrar_conversas
+registrar_contratos(app, lambda: conectar_db())
+registrar_conversas(app, lambda: conectar_db())
+
 if __name__ == '__main__':
     app.run(debug=True)

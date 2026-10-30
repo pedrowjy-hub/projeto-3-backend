@@ -1,5 +1,11 @@
 # projeto-3-backend
 
+## Assinatura eletrônica de contratos
+
+Integração Dropbox Sign exclusiva de teste, com PDF, dois participantes Premium,
+chat obrigatório, aprovação dos dois participantes, assinatura incorporada, webhook e consulta de status. Configuração, rotas e limites
+estão em [CONTRATOS.md](CONTRATOS.md). A chave fica apenas no `.env`, fora do Git.
+
 ## Preferências de aparência da conta
 
 `GET /usuarios/me/preferencias` e `PATCH /usuarios/me/preferencias` exigem JWT.
@@ -111,11 +117,9 @@ Assinatura expirada, pausada ou sem data válida recebe
 Não basta a outra parte ser Premium, e dados enviados no JSON não concedem acesso.
 Usuário externo à conversa continua recebendo `403` por falta de participação.
 
-O fechamento de contratos será exclusivo para Premium, mas não existe endpoint
-de contratos neste backend. A página `/contratos` do frontend verifica a
-assinatura e informa que o fluxo está em construção. Quando implementado, o
-endpoint de fechamento deverá reutilizar `assinatura_premium_ativa` e validar a
-participação e a assinatura de cada usuário que realizar uma ação no contrato.
+Os contratos já possuem endpoints privados e interface em `/contratos`, com
+validação de Premium, participação e envio de assinatura eletrônica de teste.
+O fluxo acontece na conversa, exige aprovação dos dois para o mesmo PDF e usa assinatura incorporada em teste. Requer `DROPBOX_SIGN_CLIENT_ID` da API App, além da API Key. Veja `CONTRATOS.md`.
 As análises públicas do YouTube estão descritas abaixo. A diferenciação entre
 análise parcial e completa por plano, destaque nas buscas e consulta de comentários
 de empresas permanecem benefícios planejados na página de planos.
