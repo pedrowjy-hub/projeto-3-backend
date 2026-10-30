@@ -101,7 +101,9 @@ def test_minha_conta_retorna_contato_da_conta_autenticada(token_usuario):
         colecao.find_one.assert_called_once_with(
             {"username": "rafacelduds"},
             {**PROJECAO_PUBLICA, "email": 1, "contato": 1, "papel": 1,
-             "assinatura": 1, "expiracao_assinatura": 1},
+             "pagamento": 1, "assinatura": 1, "expiracao_assinatura": 1, "premium_ate": 1,
+             "paddle_status": 1, "paddle_subscription_id": 1, "cancelamento_agendado": 1,
+             "renovacao_automatica": 1, "proxima_renovacao": 1, "falha_pagamento": 1},
         )
 
 
@@ -1171,78 +1173,20 @@ def test_editar_user_por_admin(token_admin):
             {"$set": {"nome": "Rafael"}},
         )
 
-def test_alterar_assinatura(token_usuario, monkeypatch):
-    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
-    with patch('api.conectar_db') as conn:
-        colecao = conn.return_value.__getitem__.return_value
-
-        colecao.find_one.return_value = {
-            "username": "rafacelduds",
-            "assinatura": False
-        }
-        colecao.update_one.return_value.matched_count = 1
-
-        dados = {
-            "assinatura": True,
-            "expiracao_assinatura": "23-10-2027"
-        }
-
-        response = app.test_client().patch(
-            "/usuarios/rafacelduds/assinatura",
-            json=dados,
-            headers=cabecalho_autorizacao(token_usuario),
-        )
-
-        assert response.status_code == 200
-        assert response.json == {"mensagem": "Assinatura atualizada com sucesso"}
-        colecao.find_one.assert_called_once_with(
-            {"username": "rafacelduds"}
-        )
-        colecao.update_one.assert_called_once_with(
-            {"username": "rafacelduds"},
-            {"$set": dados}
-        )
-
-def test_alterar_assinatura_sem_expiracao_400(token_usuario, monkeypatch):
-    monkeypatch.delenv("PADDLE_API_KEY", raising=False)
-    with patch('api.conectar_db') as conn:
-        colecao = conn.return_value.__getitem__.return_value
-
-        response = app.test_client().patch(
-            "/usuarios/rafacelduds/assinatura",
-            json={"assinatura": True},
-            headers=cabecalho_autorizacao(token_usuario),
-        )
-
-        assert response.status_code == 400
-        assert response.json == {"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}
-        colecao.update_one.assert_not_called()
-
-def test_desativar_assinatura(token_usuario, monkeypatch):
+@pytest.mark.parametrize("dados", [
+    {"assinatura": True, "expiracao_assinatura": "23-10-2099"},
+    {"assinatura": True}, {"assinatura": False},
+])
+def test_assinatura_manual_removida(token_usuario, monkeypatch, dados):
     monkeypatch.delenv("PADDLE_API_KEY", raising=False)
     with patch("api.conectar_db") as conn:
-        colecao = conn.return_value.__getitem__.return_value
-        colecao.find_one.return_value = {
-            "username": "rafacelduds",
-            "assinatura": True,
-            "expiracao_assinatura": "23-10-2027",
-        }
-        colecao.update_one.return_value.matched_count = 1
-
         response = app.test_client().patch(
-            "/usuarios/rafacelduds/assinatura",
-            json={"assinatura": False},
+            "/usuarios/rafacelduds/assinatura", json=dados,
             headers=cabecalho_autorizacao(token_usuario),
         )
+        assert response.status_code == 410
+        conn.assert_not_called()
 
-        assert response.status_code == 200
-        colecao.update_one.assert_called_once_with(
-            {"username": "rafacelduds"},
-            {
-                "$set": {"assinatura": False},
-                "$unset": {"expiracao_assinatura": ""},
-            },
-        )
 @patch("api.conectar_db")
 def test_login_ok(mock_conectar_db):
     senha = "senha_correta"

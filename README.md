@@ -1,40 +1,45 @@
 # projeto-3-backend
 
-## Checkout Paddle em sandbox
+## Pagamentos e assinaturas Paddle Sandbox
 
-A branch de pagamentos implementa o checkout, sem ativação de Premium por webhook.
-Configure `PADDLE_API_KEY`, `PADDLE_CLIENT_TOKEN` e `PADDLE_PREMIUM_PRICE_ID` no
-`.env` local (modelo em `.env.example`) e reinicie o backend. A chave precisa
-começar com `pdl_sdbx_apikey_` e o token público com `test_`. O único destino da
-API é `https://sandbox-api.paddle.com`; nenhuma opção de produção é aceita.
+O backend cria checkouts, recebe notificações assinadas, ativa/renova o Premium
+pelo período pago e agenda cancelamento sem retirar acesso antes da validade.
+Não há opção de produção: somente `https://sandbox-api.paddle.com`, API key
+`pdl_sdbx_apikey_` e token público `test_` são aceitos.
 
-`POST /usuarios/me/assinatura/checkout`, autenticado com Bearer e corpo `{}`,
-confere o preço de R$ 29,90/mês no Paddle e cria/reutiliza uma transação de
-teste vinculada ao usuário do JWT. O retorno contém `transaction_id`,
-`client_token` público e `environment: "sandbox"`, para abrir o Paddle.js.
-O endpoint não altera `assinatura` ou `expiracao_assinatura`.
+Configure no `.env` local, conforme `.env.example`:
 
-No painel de sandbox do Paddle, configure o **Default payment link**, em
-**Checkout > Checkout settings/configuration**. Nesta conta, o Paddle recusou
-`https://localhost/`, apesar da sugestão no guia de testes. Falta uma URL pública
-válida. O frontend inclui `public/paddle-checkout.html`, pronto para hospedagem
-estática mediante autorização do usuário, sem publicar o backend. O teste real
-de criação ainda retorna erro pela ausência desse campo; a abertura do checkout
-não foi validada no navegador. O frontend principal pode continuar local.
+- `PADDLE_API_KEY`: chave secreta de sandbox.
+- `PADDLE_CLIENT_TOKEN`: token público para Paddle.js.
+- `PADDLE_PREMIUM_PRICE_ID`: preço mensal de R$ 29,90 em BRL, sem trial.
+- `PADDLE_WEBHOOK_SECRET`: endpoint secret key do destino de notificações.
 
-Cliques repetidos reutilizam o checkout pendente. Falhas com resultado incerto
-ficam registradas como `needs_review` em `tbl_checkout_pagamentos` e bloqueiam
-nova compra até conferência no sandbox. Não apagar esse registro sem verificar
-se houve criação externa. O ID pode ser recuperado pela referência de
-`custom_data`, antes de continuar a integração.
+Rotas autenticadas: `POST /usuarios/me/assinatura/checkout`,
+`POST /usuarios/me/assinatura/cancelamento` e `GET /me`.
+Envie corpo vazio ou `{}` aos POSTs; o usuário vem do JWT.
 
-Com Paddle configurado, a rota antiga de alteração manual de assinatura fica
-bloqueada. Webhooks, liberação/renovação do Premium e cancelamento pelo aplicativo
-ainda estão pendentes. Para encerrar assinaturas de testes, use o painel Paddle
-Sandbox. Veja o roteiro e os próximos passos em `mudancas.md`.
+`POST /webhooks/pagamentos` dispensa JWT e exige `Paddle-Signature` válida sobre
+o corpo original, com timestamp de até cinco segundos. Configure eventos de
+transação e assinatura conforme `mudancas.md`. O backend consulta o Paddle e
+confere preço e vínculo com o checkout antes de conceder acesso. O callback do
+navegador não concede Premium. A rota manual de assinatura agora retorna `410`.
 
-Os testes de `test_checkout_pagamentos.py` exercitam o Flask e o cliente HTTP
-contra um servidor local de simulação, sem chamar a API real nem exigir segredos.
+O campo `pagamento.premium_ate` usa timestamp UTC com fuso; o acesso termina no instante
+exato. Falhas de renovação não estendem o período pago. Cancelamento é agendado
+para o fim do período, e o usuário mantém acesso até essa data. Idempotência
+usa eventos únicos e validade absoluta, com reserva por usuário para serializar
+atualizações. Não é necessário um job para bloquear acesso após a expiração:
+a validade é conferida a cada operação protegida.
+
+**Ainda pendente no ambiente:** Default payment link válido no Paddle e URL
+HTTPS para entregar os webhooks ao backend. O link temporário/deploy será
+resolvido depois; nenhuma página foi publicada. Abertura do checkout e entrega
+externa dos eventos não foram homologadas, apenas o código e as simulações
+locais. Consulte o roteiro e os critérios em `mudancas.md`.
+
+Reservas de checkout `needs_review` exigem conferência da referência no sandbox
+antes de permitir nova compra. Não apagar uma reserva incerta sem conferir se
+a transação foi criada pelo provedor. Nunca commitar o `.env`.
 
 ## Postagens
 
@@ -72,9 +77,10 @@ Premium ativa do usuário autenticado, tanto empresa quanto influenciador:
 | POST | `/chats/:id_influenciador/:id_empresa/mensagens` |
 | POST | `/chats/:id_influenciador/:id_empresa/arquivos` |
 
-O backend consulta `assinatura` e `expiracao_assinatura` em `tbl_usuarios`.
-É necessário `assinatura == true` e validade `DD-MM-AAAA` igual ou posterior ao
-dia atual em Brasília. Assinatura cancelada, expirada ou sem data válida recebe
+O backend consulta `pagamento.status` e `pagamento.premium_ate` em `tbl_usuarios`.
+Status ativo, pendente ou cancelado mantém apenas o período já pago; pausa
+bloqueia o acesso. Campos antigos continuam legíveis até a migração.
+Assinatura expirada, pausada ou sem data válida recebe
 `403` com `codigo: "premium_necessario"`; nenhum chat é consultado ou alterado.
 Não basta a outra parte ser Premium, e dados enviados no JSON não concedem acesso.
 Usuário externo à conversa continua recebendo `403` por falta de participação.
@@ -86,3 +92,19 @@ endpoint de fechamento deverá reutilizar `assinatura_premium_ativa` e validar a
 participação e a assinatura de cada usuário que realizar uma ação no contrato.
 Análises, destaque nas buscas e consulta de comentários de empresas permanecem
 benefícios planejados, sinalizados como em construção na página de planos.
+
+## Organização dos pagamentos
+
+Os dados persistidos ficam em `pagamento`: `assinatura_id`, `cliente_id`,
+`status`, `premium_ate`, `cancelamento_agendado` e `proxima_renovacao`.
+`assinatura`, `renovacao_automatica` e `falha_pagamento` são calculados nas
+respostas privadas da API; não são mais gravados no documento. O frontend
+continua recebendo os mesmos campos, sem acesso ao ID interno do cliente.
+Notificações e cancelamentos convertem registros antigos ao atualizar o estado.
+
+Para converter os registros existentes, reinicie o backend com esta versão e
+execute `python migrar_pagamentos.py` para simular ou
+`python migrar_pagamentos.py --aplicar` para gravar no banco do `.env`.
+A migração preserva o período pago, remove campos duplicados e pode ser repetida.
+Registros inconsistentes ou em atualização ficam pendentes, sem alterar o acesso.
+As coleções de checkout/eventos e os bloqueios temporários continuam necessários.

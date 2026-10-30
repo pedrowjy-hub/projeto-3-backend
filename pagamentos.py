@@ -1,4 +1,4 @@
-"""Checkout Paddle exclusivamente em sandbox. Não concede acesso Premium."""
+"""Cliente HTTP Paddle exclusivamente em sandbox; credenciais live são rejeitadas."""
 import json
 import os
 import re
@@ -53,11 +53,11 @@ def requisitar_paddle(metodo, caminho, dados=None):
         except (ValueError, AttributeError):
             pass
         if codigo == "transaction_default_checkout_url_not_set":
-            mensagem = "Configure o Default payment link em Checkout > Checkout settings no sandbox do Paddle. Para testes locais, tente https://localhost/."
+            mensagem = "Configure o Default payment link em Checkout > Checkout settings no sandbox do Paddle."
         elif erro.code in (401, 403):
             mensagem = "Confira a chave e as permissões da API de sandbox do Paddle."
         else:
-            mensagem = "O Paddle não conseguiu preparar o checkout de teste. Tente novamente."
+            mensagem = "O Paddle não conseguiu concluir a operação de teste. Tente novamente."
         raise ErroPagamento(mensagem, resultado_incerto=metodo == "POST" and erro.code >= 500) from None
     except (URLError, TimeoutError, OSError, ValueError, AttributeError):
         raise ErroPagamento(

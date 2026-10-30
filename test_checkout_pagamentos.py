@@ -190,5 +190,5 @@ def test_configuracao_default_payment_link_retorna_erro_util(scenario):
 def test_paddle_configurado_bloqueia_alteracao_manual(scenario, ativa):
     response = scenario["client"].patch("/usuarios/usuario_teste/assinatura",
         json={"assinatura": ativa, "expiracao_assinatura": "31-12-2099"}, headers=scenario["headers"])
-    assert response.status_code == 409
+    assert response.status_code == 410
     scenario["users"].update_one.assert_not_called()

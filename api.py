@@ -8,9 +8,10 @@ from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from uuid import uuid4
 from pagamentos import ErroPagamento, configuracao_paddle, requisitar_paddle, validar_preco, validar_transacao
+from assinaturas import verificar_evento, processar_evento, cancelar_renovacao, premium_ativo, campos_assinatura, CAMPOS_LEGADOS
 from bson import ObjectId, Binary
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
@@ -182,10 +183,18 @@ def minha_conta():
     usuario = conectar_db()["tbl_usuarios"].find_one(
         {"username": get_jwt_identity()},
         {**CAMPOS_PUBLICOS, "email": 1, "contato": 1, "papel": 1,
-         "assinatura": 1, "expiracao_assinatura": 1},
+         "pagamento": 1, "assinatura": 1, "expiracao_assinatura": 1, "premium_ate": 1,
+         "paddle_status": 1, "paddle_subscription_id": 1, "cancelamento_agendado": 1,
+         "renovacao_automatica": 1, "proxima_renovacao": 1, "falha_pagamento": 1},
     )
     if usuario is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
+    if "pagamento" in usuario:
+        usuario.update(campos_assinatura(usuario))
+        usuario.pop("pagamento")  # cliente_id e demais dados internos não saem na API.
+        usuario.pop("expiracao_assinatura", None)
+    elif "premium_ate" in usuario:
+        usuario["assinatura"] = premium_ativo(usuario)
     return jsonify(usuario), 200
 
 
@@ -276,6 +285,10 @@ def criar_user():
 
     if "papel" in novo_usuario:
         return jsonify({"erro":"Papel é definido pelo servidor"}),400
+
+    if any(campo in {"pagamento", *CAMPOS_LEGADOS} or campo.startswith("_paddle_")
+           for campo in novo_usuario):
+        return jsonify({"erro": "Os dados da assinatura são definidos pelo servidor."}), 400
 
     campos_obrigatorios = [
             "nome",
@@ -464,8 +477,15 @@ def criar_checkout_assinatura():
             if transacao.get("status") in ("draft", "ready"):
                 return jsonify({"environment": "sandbox", "transaction_id": transacao_id,
                                 "client_token": token, "reused": True}), 200
-            if transacao.get("status") != "canceled":
-                return jsonify({"erro": "Este checkout já foi processado. A confirmação do Premium aguarda a integração dos webhooks."}), 409
+            pode_reiniciar = transacao.get("status") == "canceled"
+            if transacao.get("status") == "completed" and transacao.get("subscription_id"):
+                assinatura_id = transacao["subscription_id"]
+                if not re.fullmatch(r"sub_[a-z0-9]{26}", assinatura_id):
+                    raise ErroPagamento("Identificador de assinatura inválido.")
+                assinatura = requisitar_paddle("GET", f"/subscriptions/{assinatura_id}")
+                pode_reiniciar = assinatura.get("id") == assinatura_id and assinatura.get("status") == "canceled"
+            if not pode_reiniciar:
+                return jsonify({"erro": "O checkout já foi processado. Aguarde a confirmação do pagamento ou confira sua assinatura."}), 409
             checkouts.delete_one({"_id": username, "transaction_id": transacao_id})
 
         validar_preco(preco_id)
@@ -501,69 +521,39 @@ def criar_checkout_assinatura():
         return jsonify({"erro": str(erro)}), erro.status
 
 
-@app.route("/usuarios/<string:username>/assinatura", methods=['PATCH'])
+@app.route("/webhooks/pagamentos", methods=["POST"])
+def receber_webhook_pagamentos():
+    try:
+        evento = verificar_evento(request.get_data(cache=True), request.headers.get("Paddle-Signature"))
+        resultado = processar_evento(conectar_db(), evento)
+        return jsonify({"status": resultado}), 200
+    except ErroPagamento as erro:
+        return jsonify({"erro": str(erro)}), erro.status
+    except PyMongoError:
+        return jsonify({"erro": "Não foi possível registrar o evento. O provedor pode reenviá-lo."}), 503
+
+
+@app.route("/usuarios/me/assinatura/cancelamento", methods=["POST"])
+@jwt_required()
+def cancelar_assinatura_paddle():
+    if request.data and request.get_json(silent=True) != {}:
+        return jsonify({"erro": "O cancelamento usa somente a identidade do usuário autenticado."}), 400
+    try:
+        usuario = cancelar_renovacao(conectar_db(), get_jwt_identity())
+        return jsonify({"mensagem": "Renovação cancelada. O acesso permanece até o fim do período pago.",
+                        **campos_assinatura(usuario)}), 200
+    except ErroPagamento as erro:
+        return jsonify({"erro": str(erro)}), erro.status
+    except PyMongoError:
+        return jsonify({"erro": "Não foi possível salvar o cancelamento. Tente novamente para conferir o estado."}), 503
+
+
+@app.route("/usuarios/<string:username>/assinatura", methods=["PATCH"])
 @jwt_required()
 def alterar_assinatura(username):
-    username_logado = get_jwt_identity()
-
-    if username_logado != username:
-        return jsonify({"erro":"Acesso Negado"}),403
-
-    if os.getenv("PADDLE_API_KEY"):
-        return jsonify({"erro": "A alteração manual está desabilitada. Use o checkout de sandbox. O cancelamento pelo Paddle ainda está em construção."}), 409
-        
-    dados = request.get_json(silent=True)
-
-    if not isinstance(dados, dict):
-        return jsonify({"erro": "JSON inválido"}), 400
-
-    assinatura = dados.get("assinatura")
-
-    if not isinstance(assinatura, bool):
-        return jsonify({"erro": "assinatura deve ser um booleano"}), 400
-
-    if assinatura:
-        expiracao = dados.get("expiracao_assinatura")
-
-        if not expiracao:
-            return jsonify({"erro": "expiracao_assinatura é obrigatória para ativar a assinatura"}), 400
-
-        try:
-            datetime.strptime(expiracao, "%d-%m-%Y")
-        except (ValueError, TypeError):
-            return jsonify({
-                "erro": "expiracao_assinatura deve ser uma data válida no formato DD-MM-AAAA"
-            }), 400
-
-        atualizacao = {
-            "$set": {
-                "assinatura": True,
-                "expiracao_assinatura": expiracao,
-            }
-        }
-    else:
-        atualizacao = {
-            "$set": {"assinatura": False},
-            "$unset": {"expiracao_assinatura": ""},
-        }
-
-    colecao = conectar_db()["tbl_usuarios"]
-
-    usuario = colecao.find_one({"username": username})
-    if usuario is None:
-        return jsonify({"erro": "Usuário não encontrado"}), 404
-
-    resultado = colecao.update_one(
-        {"username": username},
-        atualizacao,
-    )
-
-    if resultado.matched_count == 0:
-        return jsonify({"erro": "Usuário não encontrado"}), 404
-
-    return jsonify({
-        "mensagem": "Assinatura atualizada com sucesso"
-    }), 200
+    if get_jwt_identity() != username:
+        return jsonify({"erro": "Acesso Negado"}), 403
+    return jsonify({"erro": "Ativação manual removida. Use o checkout e a confirmação de pagamento pelo provedor."}), 410
 
 @app.route("/login",methods=["POST"])
 def login():
@@ -599,6 +589,8 @@ def login():
     return jsonify(access_token = token),200
 
 def assinatura_premium_ativa(usuario, hoje=None):
+    if "pagamento" in usuario or "premium_ate" in usuario:
+        return premium_ativo(usuario)
     if usuario.get("assinatura") is not True:
         return False
     expiracao = usuario.get("expiracao_assinatura")
@@ -617,7 +609,7 @@ def obter_usuario_participante(id_influenciador, id_empresa):
     username_logado = get_jwt_identity()
     usuario_logado = conectar_db()["tbl_usuarios"].find_one(
         {"username": username_logado},
-        {"_id": 0, "username": 1, "assinatura": 1, "expiracao_assinatura": 1},
+        {"_id": 0, "username": 1, "pagamento": 1, "assinatura": 1, "expiracao_assinatura": 1, "premium_ate": 1},
     )
 
     if usuario_logado is None:
