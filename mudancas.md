@@ -51,6 +51,12 @@ link do frontend e a URL `/webhooks/pagamentos` do backend no Paddle.
 
 ## Análises de influenciadores para empresas
 
+As rotas `/analises/youtube` e `/analises/youtube/<username>` já permitem
+capturar e consultar o histórico público do YouTube. Falta aplicar os níveis
+parcial e completo por plano descritos abaixo; atualmente empresas consultam
+esse histórico sem exigir Premium. Reutilizar a integração e o histórico
+existentes ao implementar essa diferenciação.
+
 As análises devem ser um recurso separado do perfil público. A empresa que faz
 a consulta define o nível de acesso; a assinatura do influenciador analisado
 não interfere nessa decisão.

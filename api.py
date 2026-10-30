@@ -16,6 +16,8 @@ from bson import ObjectId, Binary
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 from flask_bcrypt import Bcrypt
+from urllib.parse import urlparse
+import requests
 
 load_dotenv()
 app =  Flask(__name__)
@@ -39,6 +41,7 @@ def conectar_db():
 TAMANHO_MAXIMO_MIDIA_POSTAGEM = 8 * 1024 * 1024
 MAXIMO_ARQUIVOS_POSTAGEM = 3
 app.config["MAX_CONTENT_LENGTH"] = MAXIMO_ARQUIVOS_POSTAGEM * TAMANHO_MAXIMO_MIDIA_POSTAGEM + 256 * 1024
+YOUTUBE_API_URL = "https://www.googleapis.com/youtube/v3"
 
 
 @app.errorhandler(413)
@@ -166,6 +169,17 @@ def admin_required(func):
         return func(*args,**kwargs)
     return wrapper
 
+@jwt.token_in_blocklist_loader
+def token_conta_desativada(_header, payload):
+    usuario = conectar_db()["tbl_usuarios"].find_one({"username": payload["sub"]})
+    return usuario is None or usuario.get("ativo", True) is False
+
+
+@jwt.revoked_token_loader
+def conta_desativada_response(_header, _payload):
+    return jsonify({"erro": "Conta desativada ou indisponível. Entre em contato com a administração."}), 401
+
+
 TIPO_PERFIL = {"empresa","influenciador"}
 CAMPOS_PUBLICOS = {
     "_id":0,
@@ -202,7 +216,7 @@ def minha_conta():
 def lista_users():
     tipo_perfil = request.args.get("tipo_perfil")
 
-    filtro = {"papel":"usuario"}
+    filtro = {"papel":"usuario", "ativo": {"$ne": False}}
 
     if tipo_perfil:
         if tipo_perfil not in TIPO_PERFIL:
@@ -219,7 +233,7 @@ def lista_users():
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
     usuario = conectar_db()["tbl_usuarios"].find_one(
-        {"username": username,"papel":"usuario"},
+        {"username": username,"papel":"usuario", "ativo": {"$ne": False}},
         CAMPOS_PUBLICOS,
     )
 
@@ -249,11 +263,14 @@ def delete_user(username):
     if not bcrypt.check_password_hash(dados_user["senha"],senha):
         return jsonify({"erro":"A senha inválida, por favor digite a senha do usuário atual"}),400
 
-    usuario = conectar_db()["tbl_usuarios"].delete_one(
+    if dados_user.get("papel") == "admin" and username == get_jwt_identity():
+        return jsonify({"erro": "Não é permitido desativar sua própria conta administrativa"}), 400
+    usuario = conectar_db()["tbl_usuarios"].update_one(
         {"username": username},
+        {"$set": {"ativo": False}},
     )
 
-    if usuario.deleted_count == 0:
+    if usuario.matched_count == 0:
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
 
@@ -352,6 +369,7 @@ def criar_user():
         ),409
     
     novo_usuario["papel"]="usuario"
+    novo_usuario["ativo"] = True
     
     colecao.insert_one(novo_usuario)
 
@@ -583,6 +601,9 @@ def login():
 
     if usuario is None or not bcrypt.check_password_hash(usuario.get("senha"),dados.get("senha")):
         return jsonify({"erro": "Credenciais inválidas"}),401
+
+    if usuario.get("ativo", True) is False:
+        return jsonify({"erro": "Conta desativada. Entre em contato com a administração."}), 403
 
     token = create_access_token(identity=usuario["username"],
                                 additional_claims={"email":usuario["email"]})
@@ -831,6 +852,27 @@ def admin_listar_user():
 
     return jsonify(usuarios),200
 
+@app.route("/admin/usuarios/<string:username>/status", methods=["PATCH"])
+@admin_required
+def alterar_status_usuario(username):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or set(dados) != {"ativo", "senha"} or type(dados.get("ativo")) is not bool:
+        return jsonify({"erro": "Informe ativo como true ou false e sua senha atual"}), 400
+    senha = dados.get("senha")
+    if not isinstance(senha, str) or not senha:
+        return jsonify({"erro": "Informe sua senha atual"}), 400
+    colecao = conectar_db()["tbl_usuarios"]
+    administrador = colecao.find_one({"username": get_jwt_identity()})
+    if not bcrypt.check_password_hash(administrador["senha"], senha):
+        return jsonify({"erro": "Senha inválida"}), 400
+    if not dados["ativo"] and username == get_jwt_identity():
+        return jsonify({"erro": "Não é permitido desativar sua própria conta administrativa"}), 400
+    resultado = colecao.update_one({"username": username}, {"$set": {"ativo": dados["ativo"]}})
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    return jsonify({"username": username, "ativo": dados["ativo"]}), 200
+
+
 @app.route("/admin/usuario/<string:username>",methods=["GET"])
 @admin_required
 def admin_busca_user(username):
@@ -895,6 +937,7 @@ def criar_admin():
         ),409
 
     novo_admin["papel"] = "admin"
+    novo_admin["ativo"] = True
 
     colecao.insert_one(novo_admin)
 
@@ -1109,6 +1152,370 @@ def deletar_postagem(postagem_id):
     colecao.delete_one({"_id": ObjectId(postagem_id)})
     remover_midias_extras(postagem.get("midias", []))
     return jsonify(), 204
+
+
+
+# Denúncias: identidade e permissões são sempre determinadas pelo servidor.
+MOTIVOS_DENUNCIA = {
+    "Perfil falso ou falsa identidade", "Fraude ou tentativa de golpe",
+    "Assédio ou comportamento ofensivo", "Conteúdo inadequado", "Spam", "Outro motivo",
+}
+STATUS_DENUNCIA = {"pendente", "em_analise", "concluida"}
+
+
+def serializar_denuncia(documento):
+    campos = ("denunciante", "denunciado", "motivo", "descricao", "status",
+              "resposta", "criada_em", "atualizada_em", "administrador")
+    resultado = {campo: documento.get(campo) for campo in campos}
+    resultado["id"] = str(documento["_id"])
+    for campo in ("criada_em", "atualizada_em"):
+        data = resultado[campo]
+        if isinstance(data, datetime):
+            if data.tzinfo is None:
+                data = data.replace(tzinfo=timezone.utc)
+            resultado[campo] = data.astimezone(timezone.utc).isoformat()
+    return resultado
+
+
+def denunciante_required(func):
+    @wraps(func)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        usuario = conectar_db()["tbl_usuarios"].find_one({"username": get_jwt_identity()})
+        if usuario is None:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        if usuario.get("papel") != "usuario" or usuario.get("tipo_perfil") not in TIPO_PERFIL:
+            return jsonify({"erro": "Acesso negado"}), 403
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/denuncias", methods=["POST"])
+@denunciante_required
+def criar_denuncia():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "Envie um objeto JSON válido"}), 400
+    if set(dados) - {"denunciado", "motivo", "descricao"}:
+        return jsonify({"erro": "Envie apenas denunciado, motivo e descricao"}), 400
+    if any(not isinstance(dados.get(campo), str) for campo in ("denunciado", "motivo", "descricao")):
+        return jsonify({"erro": "Informe perfil, motivo e descrição"}), 400
+    denunciado, motivo, descricao = (dados[campo].strip() for campo in ("denunciado", "motivo", "descricao"))
+    if not denunciado or len(denunciado) > 200 or motivo not in MOTIVOS_DENUNCIA or not 20 <= len(descricao) <= 2000:
+        return jsonify({"erro": "Informe um perfil, um motivo válido e uma descrição de 20 a 2000 caracteres"}), 400
+    username = get_jwt_identity()
+    if denunciado == username:
+        return jsonify({"erro": "Você não pode denunciar a própria conta"}), 400
+    db = conectar_db()
+    alvo = db["tbl_usuarios"].find_one({"username": denunciado, "papel": "usuario"})
+    if alvo is None or alvo.get("tipo_perfil") not in TIPO_PERFIL:
+        return jsonify({"erro": "Perfil denunciado não encontrado"}), 404
+    agora = datetime.now(timezone.utc)
+    documento = {"_id": ObjectId(), "denunciante": username, "denunciado": denunciado,
+                 "motivo": motivo, "descricao": descricao, "status": "pendente",
+                 "resposta": "", "criada_em": agora, "atualizada_em": agora, "administrador": None}
+    db["tbl_denuncias"].insert_one(documento)
+    return jsonify({"denuncia": serializar_denuncia(documento)}), 201
+
+
+@app.route("/denuncias", methods=["GET"])
+@denunciante_required
+def minhas_denuncias():
+    documentos = conectar_db()["tbl_denuncias"].find({"denunciante": get_jwt_identity()}).sort("criada_em", -1)
+    return jsonify([serializar_denuncia(item) for item in documentos]), 200
+
+
+@app.route("/admin/denuncias", methods=["GET"])
+@admin_required
+def listar_denuncias_admin():
+    status = request.args.get("status")
+    if status is not None and status not in STATUS_DENUNCIA:
+        return jsonify({"erro": "Status inválido"}), 400
+    filtro = {"status": status} if status else {}
+    documentos = conectar_db()["tbl_denuncias"].find(filtro).sort("criada_em", -1)
+    return jsonify([serializar_denuncia(item) for item in documentos]), 200
+
+
+@app.route("/admin/denuncias/<string:denuncia_id>", methods=["PATCH"])
+@admin_required
+def atualizar_denuncia_admin(denuncia_id):
+    if not ObjectId.is_valid(denuncia_id):
+        return jsonify({"erro": "Denúncia não encontrada"}), 404
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or not dados or set(dados) - {"status", "resposta"}:
+        return jsonify({"erro": "Envie status e/ou resposta"}), 400
+    if "status" in dados and (not isinstance(dados["status"], str) or dados["status"] not in STATUS_DENUNCIA):
+        return jsonify({"erro": "Status inválido"}), 400
+    if "resposta" in dados and (not isinstance(dados["resposta"], str) or len(dados["resposta"].strip()) > 2000):
+        return jsonify({"erro": "A resposta deve ser um texto de até 2000 caracteres"}), 400
+    colecao = conectar_db()["tbl_denuncias"]
+    documento = colecao.find_one({"_id": ObjectId(denuncia_id)})
+    if documento is None:
+        return jsonify({"erro": "Denúncia não encontrada"}), 404
+    status = dados.get("status", documento["status"])
+    resposta = dados.get("resposta", documento.get("resposta", "")).strip()
+    if status == "concluida" and not resposta:
+        return jsonify({"erro": "Informe uma resposta para concluir a denúncia"}), 400
+    alteracoes = {"status": status, "resposta": resposta,
+                  "administrador": get_jwt_identity(), "atualizada_em": datetime.now(timezone.utc)}
+    # Impede que duas análises simultâneas sobrescrevam silenciosamente uma à outra.
+    resultado = colecao.update_one({"_id": documento["_id"], "atualizada_em": documento["atualizada_em"]}, {"$set": alteracoes})
+    if not resultado.matched_count:
+        return jsonify({"erro": "A denúncia foi alterada. Atualize a lista e tente novamente"}), 409
+    documento.update(alteracoes)
+    return jsonify({"denuncia": serializar_denuncia(documento)}), 200
+def identificar_canal_youtube(url):
+    """Converte formatos comuns de URL de canal nos filtros da YouTube API."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+
+    valor = url.strip()
+    if "://" not in valor:
+        valor = "https://" + valor
+
+    try:
+        parsed = urlparse(valor)
+    except ValueError:
+        return None
+
+    host = (parsed.hostname or "").lower()
+    if host not in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        return None
+
+    partes = [parte for parte in parsed.path.split("/") if parte]
+    if not partes:
+        return None
+
+    if partes[0] == "channel" and len(partes) >= 2:
+        return {"id": partes[1]}
+    if partes[0].startswith("@") and len(partes[0]) > 1:
+        return {"forHandle": partes[0]}
+    if partes[0] == "user" and len(partes) >= 2:
+        return {"forUsername": partes[1]}
+    return None
+
+
+def consultar_youtube(endpoint, parametros):
+    chave = os.getenv("YOUTUBE_API_KEY")
+    if not chave:
+        return None, (jsonify({
+            "erro": "Integração com YouTube não configurada",
+            "detalhe": "Defina a variável de ambiente YOUTUBE_API_KEY",
+        }), 503)
+
+    try:
+        resposta = requests.get(
+            f"{YOUTUBE_API_URL}/{endpoint}",
+            params={**parametros, "key": chave},
+            timeout=10,
+        )
+        resposta.raise_for_status()
+        return resposta.json(), None
+    except requests.HTTPError as erro:
+        status = erro.response.status_code if erro.response is not None else None
+        if status in {403, 429}:
+            return None, (jsonify({
+                "erro": "Cota ou acesso da YouTube Data API indisponível"
+            }), 503)
+        return None, (jsonify({"erro": "Falha ao consultar a YouTube Data API"}), 502)
+    except requests.RequestException:
+        return None, (jsonify({"erro": "Não foi possível consultar o YouTube"}), 502)
+    except ValueError:
+        return None, (jsonify({"erro": "Resposta inválida recebida do YouTube"}), 502)
+
+
+def converter_metrica_publica(valor):
+    return int(valor) if valor is not None else None
+
+
+def obter_estatisticas_publicas_youtube(identificador):
+    canais, erro = consultar_youtube("channels", {
+        "part": "snippet,statistics,contentDetails",
+        **identificador,
+    })
+    if erro:
+        return None, erro
+
+    itens_canais = canais.get("items", [])
+    if not itens_canais:
+        return None, (jsonify({"erro": "Canal do YouTube não encontrado"}), 404)
+
+    canal = itens_canais[0]
+    snippet = canal.get("snippet", {})
+    estatisticas = canal.get("statistics", {})
+    playlist_uploads = (
+        canal.get("contentDetails", {})
+        .get("relatedPlaylists", {})
+        .get("uploads")
+    )
+
+    videos_recentes = []
+    if playlist_uploads:
+        playlist, erro = consultar_youtube("playlistItems", {
+            "part": "contentDetails",
+            "playlistId": playlist_uploads,
+            "maxResults": 10,
+        })
+        if erro:
+            return None, erro
+
+        ids_videos = [
+            item.get("contentDetails", {}).get("videoId")
+            for item in playlist.get("items", [])
+        ]
+        ids_videos = [video_id for video_id in ids_videos if video_id]
+        if ids_videos:
+            videos, erro = consultar_youtube("videos", {
+                "part": "snippet,statistics",
+                "id": ",".join(ids_videos),
+            })
+            if erro:
+                return None, erro
+
+            videos_recentes = [{
+                "id": video["id"],
+                "titulo": video.get("snippet", {}).get("title"),
+                "publicado_em": video.get("snippet", {}).get("publishedAt"),
+                "visualizacoes": converter_metrica_publica(
+                    video.get("statistics", {}).get("viewCount")
+                ),
+                "curtidas": converter_metrica_publica(
+                    video.get("statistics", {}).get("likeCount")
+                ),
+                "comentarios": converter_metrica_publica(
+                    video.get("statistics", {}).get("commentCount")
+                ),
+                "url": f"https://www.youtube.com/watch?v={video['id']}",
+            } for video in videos.get("items", [])]
+
+    inscricoes_ocultas = estatisticas.get("hiddenSubscriberCount", False)
+    return {
+        "plataforma": "youtube",
+        "perfil": {
+            "id": canal.get("id"),
+            "nome": snippet.get("title"),
+            "descricao": snippet.get("description"),
+            "url": f"https://www.youtube.com/channel/{canal.get('id')}",
+            "criado_em": snippet.get("publishedAt"),
+        },
+        "metricas": {
+            "seguidores": None if inscricoes_ocultas else converter_metrica_publica(
+                estatisticas.get("subscriberCount")
+            ),
+            "seguidores_ocultos": inscricoes_ocultas,
+            "visualizacoes_totais": converter_metrica_publica(
+                estatisticas.get("viewCount")
+            ),
+            "total_publicacoes": converter_metrica_publica(
+                estatisticas.get("videoCount")
+            ),
+        },
+        "videos_recentes": videos_recentes,
+    }, None
+
+
+@app.route("/analises/youtube", methods=["POST"])
+@jwt_required()
+def criar_analise_youtube():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    url = dados.get("url")
+    identificador = identificar_canal_youtube(url)
+    if identificador is None:
+        return jsonify({
+            "erro": "Link de canal do YouTube inválido ou não suportado",
+            "formatos_suportados": [
+                "youtube.com/@canal",
+                "youtube.com/channel/ID_DO_CANAL",
+                "youtube.com/user/usuario",
+            ],
+        }), 400
+
+    usuario = conectar_db()["tbl_usuarios"].find_one(
+        {"username": get_jwt_identity()},
+        {"_id": 0, "tipo_perfil": 1},
+    )
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if usuario.get("tipo_perfil") != "influenciador":
+        return jsonify({"erro": "Somente influenciadores podem cadastrar uma análise"}), 403
+
+    analise, erro = obter_estatisticas_publicas_youtube(identificador)
+    if erro:
+        return erro
+
+    agora = datetime.now(timezone.utc)
+    username = get_jwt_identity()
+    documento = {
+        **analise,
+        "username": username,
+        "data_referencia": agora.date().isoformat(),
+        "coletado_em": agora,
+    }
+    colecao = conectar_db()["tbl_analises_influenciadores"]
+    colecao.update_one(
+        {
+            "username": username,
+            "plataforma": "youtube",
+            "perfil.id": analise["perfil"]["id"],
+            "data_referencia": documento["data_referencia"],
+        },
+        {"$set": documento},
+        upsert=True,
+    )
+
+    documento["coletado_em"] = agora.isoformat()
+    return jsonify({"analise": documento}), 200
+
+
+@app.route("/analises/youtube", methods=["GET"])
+@jwt_required()
+def listar_historico_analises_youtube():
+    return responder_historico_youtube(get_jwt_identity())
+
+
+@app.route("/analises/youtube/<string:username>", methods=["GET"])
+@jwt_required()
+def listar_historico_youtube_por_influenciador(username):
+    usuarios = conectar_db()["tbl_usuarios"]
+    solicitante = usuarios.find_one(
+        {"username": get_jwt_identity()}, {"_id": 0, "tipo_perfil": 1}
+    )
+    if solicitante is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if solicitante.get("tipo_perfil") != "empresa" and not (
+        solicitante.get("tipo_perfil") == "influenciador"
+        and get_jwt_identity() == username
+    ):
+        return jsonify({"erro": "Acesso negado"}), 403
+
+    influenciador = usuarios.find_one(
+        {"username": username}, {"_id": 0, "tipo_perfil": 1}
+    )
+    if influenciador is None or influenciador.get("tipo_perfil") != "influenciador":
+        return jsonify({"erro": "Influenciador não encontrado"}), 404
+    return responder_historico_youtube(username)
+
+
+def responder_historico_youtube(username):
+    documentos = list(
+        conectar_db()["tbl_analises_influenciadores"].find(
+            {"username": username, "plataforma": "youtube"},
+            {"_id": 0, "username": 0},
+        ).sort("data_referencia", -1).limit(90)
+    )
+    documentos.reverse()
+    for documento in documentos:
+        coletado_em = documento.get("coletado_em")
+        if isinstance(coletado_em, datetime):
+            documento["coletado_em"] = coletado_em.isoformat()
+
+    return jsonify({
+        "plataforma": "youtube",
+        "historico": documentos,
+    }), 200
 
 
 if __name__ == '__main__':

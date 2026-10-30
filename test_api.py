@@ -6,6 +6,14 @@ from bson import Binary, ObjectId
 from flask_jwt_extended import create_access_token, decode_token
 from api import app, bcrypt
 
+
+@pytest.fixture(autouse=True)
+def isolar_verificacao_de_conta_ativa(monkeypatch):
+    # Estes testes isolam as rotas. A revogação por conta desativada é exercitada
+    # sem substituição em test_contas_ativas.py e nos fluxos de pagamento.
+    monkeypatch.setattr(app.extensions["flask-jwt-extended"],
+                        "_token_in_blocklist_callback", lambda _header, _payload: False)
+
 @pytest.mark.parametrize("metodo", ["post", "patch"])
 @pytest.mark.parametrize("contato,valido", [
     ("1133334444", True), ("11999998888", True),
@@ -536,7 +544,7 @@ def test_buscar_user():
         assert response.status_code == 200
         assert response.json == usuario_publico
         colecao.find_one.assert_called_once_with(
-            {"username": "rafacelduds", "papel": "usuario"},
+            {"username": "rafacelduds", "papel": "usuario", "ativo": {"$ne": False}},
             PROJECAO_PUBLICA,
         )
         
@@ -567,7 +575,7 @@ def test_deletar_user(request, hash_senha_exclusao, token_fixture, solicitante, 
         colecao.find_one.return_value = {
             "username": solicitante, "papel": papel, "senha": hash_senha_exclusao,
         }
-        colecao.delete_one.return_value.deleted_count = 1
+        colecao.update_one.return_value.matched_count = 1
 
         response = app.test_client().delete(
             f"/usuarios/{alvo}",
@@ -579,8 +587,9 @@ def test_deletar_user(request, hash_senha_exclusao, token_fixture, solicitante, 
             call({"username": solicitante}, {"_id": 0, "papel": 1}),
             call({"username": solicitante}),
         ]
-        colecao.delete_one.assert_called_once_with(
-            {"username": alvo}
+        colecao.delete_one.assert_not_called()
+        colecao.update_one.assert_called_once_with(
+            {"username": alvo}, {"$set": {"ativo": False}}
         )
 
 def test_deletar_user_404(token_admin, hash_senha_exclusao):
@@ -589,7 +598,7 @@ def test_deletar_user_404(token_admin, hash_senha_exclusao):
         colecao.find_one.return_value = {
             "username": "testeadmin", "papel": "admin", "senha": hash_senha_exclusao,
         }
-        colecao.delete_one.return_value.deleted_count = 0
+        colecao.update_one.return_value.matched_count = 0
 
         response = app.test_client().delete(
             "/usuarios/fulano",
@@ -599,7 +608,8 @@ def test_deletar_user_404(token_admin, hash_senha_exclusao):
 
         assert response.status_code == 404
         assert response.json == {"erro": "Usuário não encontrado"}
-        colecao.delete_one.assert_called_once_with({"username": "fulano"})
+        colecao.delete_one.assert_not_called()
+        colecao.update_one.assert_called_once_with({"username": "fulano"}, {"$set": {"ativo": False}})
 
 
 @pytest.mark.parametrize("corpo", ["", "{", "null", "[]", '"senha"', "123"])
@@ -710,7 +720,7 @@ def test_listar_dados_ok(mock_conectar_db):
     assert response.status_code == 200
     assert response.get_json() == usuarios
     mock_collection.find.assert_called_once_with(
-        {"papel": "usuario"}, PROJECAO_PUBLICA
+        {"papel": "usuario", "ativo": {"$ne": False}}, PROJECAO_PUBLICA
     )
 
 @patch("api.conectar_db")
@@ -723,7 +733,7 @@ def test_listar_sem_dados(mock_conectar_db):
     assert response.status_code == 200
     assert response.get_json() == []
     colecao.find.assert_called_once_with(
-        {"papel": "usuario"}, PROJECAO_PUBLICA
+        {"papel": "usuario", "ativo": {"$ne": False}}, PROJECAO_PUBLICA
     )
 
 
@@ -736,7 +746,7 @@ def test_listar_filtra_por_tipo_perfil(mock_conectar_db):
 
     assert response.status_code == 200
     colecao.find.assert_called_once_with(
-        {"papel": "usuario", "tipo_perfil": "empresa"},
+        {"papel": "usuario", "tipo_perfil": "empresa", "ativo": {"$ne": False}},
         PROJECAO_PUBLICA,
     )
 
