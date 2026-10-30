@@ -1,5 +1,31 @@
 # projeto-3-backend
 
+## Preferências de aparência da conta
+
+`GET /usuarios/me/preferencias` e `PATCH /usuarios/me/preferencias` exigem JWT.
+O usuário é sempre o `sub` autenticado; não aceitam seleção de outra conta.
+Contas inexistentes/desativadas recebem `401` e token ausente/inválido é recusado.
+
+O GET retorna `{"preferencias": {...}}`. Contas antigas sem preferências recebem
+os padrões sem precisar de migração: `tema: "claro"`, `fonte: "padrao"`,
+`cor: "verde"`, `reduzirMovimento: false`, `altoContraste: false`.
+
+O PATCH aceita um objeto não vazio com um ou mais desses campos:
+
+| Campo | Valores aceitos |
+| --- | --- |
+| `tema` | `claro`, `escuro`, `sistema` |
+| `fonte` | `padrao`, `grande`, `maior` |
+| `cor` | `verde`, `azul`, `ameixa` |
+| `reduzirMovimento` / `altoContraste` | Booleanos JSON |
+
+Exemplo: `{"tema":"escuro","altoContraste":true}`. Responde `200` com todas
+as preferências atuais. Campos desconhecidos, tipos ou valores inválidos geram
+`400`, sem gravação. Falha de persistência retorna `503`, sem confirmar sucesso.
+Campos enviados são atualizados atomicamente em `tbl_usuarios.preferencias`,
+preservando os não enviados e sem modificar perfil ou pagamento. As consultas
+públicas de usuários não expõem essas preferências. Não há chamada ao Paddle.
+
 ## Pagamentos e assinaturas Paddle Sandbox
 
 O backend cria checkouts, recebe notificações assinadas, ativa/renova o Premium

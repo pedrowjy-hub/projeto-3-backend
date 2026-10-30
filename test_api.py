@@ -64,6 +64,8 @@ PROJECAO_PUBLICA = {
     "nicho": 1,
     "plataformas": 1,
     "descricao": 1,
+    "cidade": 1,
+    "estado": 1,
 }
 
 

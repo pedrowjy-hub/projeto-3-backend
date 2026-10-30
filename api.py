@@ -7,7 +7,8 @@ from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, get_jwt_identity
 )
-from pymongo import MongoClient
+from pymongo import MongoClient, ReturnDocument
+from preferencias import validar_preferencias, preferencias_usuario
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from uuid import uuid4
 from pagamentos import ErroPagamento, configuracao_paddle, requisitar_paddle, validar_preco, validar_transacao
@@ -212,6 +213,30 @@ def minha_conta():
     elif "premium_ate" in usuario:
         usuario["assinatura"] = premium_ativo(usuario)
     return jsonify(usuario), 200
+
+
+@app.route('/usuarios/me/preferencias', methods=['GET', 'PATCH'])
+@jwt_required()
+def minhas_preferencias():
+    filtro = {"username": get_jwt_identity(), "ativo": {"$ne": False}}
+    projecao = {"_id": 0, "preferencias": 1}
+    try:
+        usuarios = conectar_db()["tbl_usuarios"]
+        if request.method == 'PATCH':
+            dados = request.get_json(silent=True)
+            if not validar_preferencias(dados):
+                return jsonify({"erro": "Envie somente preferências de aparência válidas."}), 400
+            usuario = usuarios.find_one_and_update(
+                filtro, {"$set": {f"preferencias.{chave}": valor for chave, valor in dados.items()}},
+                projection=projecao, return_document=ReturnDocument.AFTER,
+            )
+        else:
+            usuario = usuarios.find_one(filtro, projecao)
+        if usuario is None:
+            return jsonify({"erro": "Usuário não encontrado ou desativado."}), 401
+        return jsonify({"preferencias": preferencias_usuario(usuario)}), 200
+    except PyMongoError:
+        return jsonify({"erro": "Não foi possível acessar suas preferências. Tente novamente."}), 503
 
 
 @app.route('/usuarios',methods=['GET'])
