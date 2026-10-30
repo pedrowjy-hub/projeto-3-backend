@@ -5,3 +5,4 @@ python-dotenv
 flask_cors
 Flask-JWT-Extended
 flask_bcrypt
+requests>=2.32,<3
