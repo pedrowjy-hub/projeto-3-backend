@@ -165,6 +165,17 @@ def admin_required(func):
         return func(*args,**kwargs)
     return wrapper
 
+@jwt.token_in_blocklist_loader
+def token_conta_desativada(_header, payload):
+    usuario = conectar_db()["tbl_usuarios"].find_one({"username": payload["sub"]})
+    return usuario is None or usuario.get("ativo", True) is False
+
+
+@jwt.revoked_token_loader
+def conta_desativada_response(_header, _payload):
+    return jsonify({"erro": "Conta desativada ou indisponível. Entre em contato com a administração."}), 401
+
+
 TIPO_PERFIL = {"empresa","influenciador"}
 CAMPOS_PUBLICOS = {
     "_id":0,
@@ -193,7 +204,7 @@ def minha_conta():
 def lista_users():
     tipo_perfil = request.args.get("tipo_perfil")
 
-    filtro = {"papel":"usuario"}
+    filtro = {"papel":"usuario", "ativo": {"$ne": False}}
 
     if tipo_perfil:
         if tipo_perfil not in TIPO_PERFIL:
@@ -210,7 +221,7 @@ def lista_users():
 @app.route('/usuarios/<string:username>', methods=['GET'])
 def buscar_user(username):
     usuario = conectar_db()["tbl_usuarios"].find_one(
-        {"username": username,"papel":"usuario"},
+        {"username": username,"papel":"usuario", "ativo": {"$ne": False}},
         CAMPOS_PUBLICOS,
     )
 
@@ -240,11 +251,14 @@ def delete_user(username):
     if not bcrypt.check_password_hash(dados_user["senha"],senha):
         return jsonify({"erro":"A senha inválida, por favor digite a senha do usuário atual"}),400
 
-    usuario = conectar_db()["tbl_usuarios"].delete_one(
+    if dados_user.get("papel") == "admin" and username == get_jwt_identity():
+        return jsonify({"erro": "Não é permitido desativar sua própria conta administrativa"}), 400
+    usuario = conectar_db()["tbl_usuarios"].update_one(
         {"username": username},
+        {"$set": {"ativo": False}},
     )
 
-    if usuario.deleted_count == 0:
+    if usuario.matched_count == 0:
         return jsonify({"erro": "Usuário não encontrado"}), 404
     return jsonify(), 204
 
@@ -339,6 +353,7 @@ def criar_user():
         ),409
     
     novo_usuario["papel"]="usuario"
+    novo_usuario["ativo"] = True
     
     colecao.insert_one(novo_usuario)
 
@@ -520,6 +535,9 @@ def login():
 
     if usuario is None or not bcrypt.check_password_hash(usuario.get("senha"),dados.get("senha")):
         return jsonify({"erro": "Credenciais inválidas"}),401
+
+    if usuario.get("ativo", True) is False:
+        return jsonify({"erro": "Conta desativada. Entre em contato com a administração."}), 403
 
     token = create_access_token(identity=usuario["username"],
                                 additional_claims={"email":usuario["email"]})
@@ -766,6 +784,27 @@ def admin_listar_user():
 
     return jsonify(usuarios),200
 
+@app.route("/admin/usuarios/<string:username>/status", methods=["PATCH"])
+@admin_required
+def alterar_status_usuario(username):
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or set(dados) != {"ativo", "senha"} or type(dados.get("ativo")) is not bool:
+        return jsonify({"erro": "Informe ativo como true ou false e sua senha atual"}), 400
+    senha = dados.get("senha")
+    if not isinstance(senha, str) or not senha:
+        return jsonify({"erro": "Informe sua senha atual"}), 400
+    colecao = conectar_db()["tbl_usuarios"]
+    administrador = colecao.find_one({"username": get_jwt_identity()})
+    if not bcrypt.check_password_hash(administrador["senha"], senha):
+        return jsonify({"erro": "Senha inválida"}), 400
+    if not dados["ativo"] and username == get_jwt_identity():
+        return jsonify({"erro": "Não é permitido desativar sua própria conta administrativa"}), 400
+    resultado = colecao.update_one({"username": username}, {"$set": {"ativo": dados["ativo"]}})
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    return jsonify({"username": username, "ativo": dados["ativo"]}), 200
+
+
 @app.route("/admin/usuario/<string:username>",methods=["GET"])
 @admin_required
 def admin_busca_user(username):
@@ -830,6 +869,7 @@ def criar_admin():
         ),409
 
     novo_admin["papel"] = "admin"
+    novo_admin["ativo"] = True
 
     colecao.insert_one(novo_admin)
 
@@ -1046,6 +1086,116 @@ def deletar_postagem(postagem_id):
     return jsonify(), 204
 
 
+
+# Denúncias: identidade e permissões são sempre determinadas pelo servidor.
+MOTIVOS_DENUNCIA = {
+    "Perfil falso ou falsa identidade", "Fraude ou tentativa de golpe",
+    "Assédio ou comportamento ofensivo", "Conteúdo inadequado", "Spam", "Outro motivo",
+}
+STATUS_DENUNCIA = {"pendente", "em_analise", "concluida"}
+
+
+def serializar_denuncia(documento):
+    campos = ("denunciante", "denunciado", "motivo", "descricao", "status",
+              "resposta", "criada_em", "atualizada_em", "administrador")
+    resultado = {campo: documento.get(campo) for campo in campos}
+    resultado["id"] = str(documento["_id"])
+    for campo in ("criada_em", "atualizada_em"):
+        data = resultado[campo]
+        if isinstance(data, datetime):
+            if data.tzinfo is None:
+                data = data.replace(tzinfo=timezone.utc)
+            resultado[campo] = data.astimezone(timezone.utc).isoformat()
+    return resultado
+
+
+def denunciante_required(func):
+    @wraps(func)
+    @jwt_required()
+    def wrapper(*args, **kwargs):
+        usuario = conectar_db()["tbl_usuarios"].find_one({"username": get_jwt_identity()})
+        if usuario is None:
+            return jsonify({"erro": "Usuário não encontrado"}), 401
+        if usuario.get("papel") != "usuario" or usuario.get("tipo_perfil") not in TIPO_PERFIL:
+            return jsonify({"erro": "Acesso negado"}), 403
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/denuncias", methods=["POST"])
+@denunciante_required
+def criar_denuncia():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "Envie um objeto JSON válido"}), 400
+    if set(dados) - {"denunciado", "motivo", "descricao"}:
+        return jsonify({"erro": "Envie apenas denunciado, motivo e descricao"}), 400
+    if any(not isinstance(dados.get(campo), str) for campo in ("denunciado", "motivo", "descricao")):
+        return jsonify({"erro": "Informe perfil, motivo e descrição"}), 400
+    denunciado, motivo, descricao = (dados[campo].strip() for campo in ("denunciado", "motivo", "descricao"))
+    if not denunciado or len(denunciado) > 200 or motivo not in MOTIVOS_DENUNCIA or not 20 <= len(descricao) <= 2000:
+        return jsonify({"erro": "Informe um perfil, um motivo válido e uma descrição de 20 a 2000 caracteres"}), 400
+    username = get_jwt_identity()
+    if denunciado == username:
+        return jsonify({"erro": "Você não pode denunciar a própria conta"}), 400
+    db = conectar_db()
+    alvo = db["tbl_usuarios"].find_one({"username": denunciado, "papel": "usuario"})
+    if alvo is None or alvo.get("tipo_perfil") not in TIPO_PERFIL:
+        return jsonify({"erro": "Perfil denunciado não encontrado"}), 404
+    agora = datetime.now(timezone.utc)
+    documento = {"_id": ObjectId(), "denunciante": username, "denunciado": denunciado,
+                 "motivo": motivo, "descricao": descricao, "status": "pendente",
+                 "resposta": "", "criada_em": agora, "atualizada_em": agora, "administrador": None}
+    db["tbl_denuncias"].insert_one(documento)
+    return jsonify({"denuncia": serializar_denuncia(documento)}), 201
+
+
+@app.route("/denuncias", methods=["GET"])
+@denunciante_required
+def minhas_denuncias():
+    documentos = conectar_db()["tbl_denuncias"].find({"denunciante": get_jwt_identity()}).sort("criada_em", -1)
+    return jsonify([serializar_denuncia(item) for item in documentos]), 200
+
+
+@app.route("/admin/denuncias", methods=["GET"])
+@admin_required
+def listar_denuncias_admin():
+    status = request.args.get("status")
+    if status is not None and status not in STATUS_DENUNCIA:
+        return jsonify({"erro": "Status inválido"}), 400
+    filtro = {"status": status} if status else {}
+    documentos = conectar_db()["tbl_denuncias"].find(filtro).sort("criada_em", -1)
+    return jsonify([serializar_denuncia(item) for item in documentos]), 200
+
+
+@app.route("/admin/denuncias/<string:denuncia_id>", methods=["PATCH"])
+@admin_required
+def atualizar_denuncia_admin(denuncia_id):
+    if not ObjectId.is_valid(denuncia_id):
+        return jsonify({"erro": "Denúncia não encontrada"}), 404
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict) or not dados or set(dados) - {"status", "resposta"}:
+        return jsonify({"erro": "Envie status e/ou resposta"}), 400
+    if "status" in dados and (not isinstance(dados["status"], str) or dados["status"] not in STATUS_DENUNCIA):
+        return jsonify({"erro": "Status inválido"}), 400
+    if "resposta" in dados and (not isinstance(dados["resposta"], str) or len(dados["resposta"].strip()) > 2000):
+        return jsonify({"erro": "A resposta deve ser um texto de até 2000 caracteres"}), 400
+    colecao = conectar_db()["tbl_denuncias"]
+    documento = colecao.find_one({"_id": ObjectId(denuncia_id)})
+    if documento is None:
+        return jsonify({"erro": "Denúncia não encontrada"}), 404
+    status = dados.get("status", documento["status"])
+    resposta = dados.get("resposta", documento.get("resposta", "")).strip()
+    if status == "concluida" and not resposta:
+        return jsonify({"erro": "Informe uma resposta para concluir a denúncia"}), 400
+    alteracoes = {"status": status, "resposta": resposta,
+                  "administrador": get_jwt_identity(), "atualizada_em": datetime.now(timezone.utc)}
+    # Impede que duas análises simultâneas sobrescrevam silenciosamente uma à outra.
+    resultado = colecao.update_one({"_id": documento["_id"], "atualizada_em": documento["atualizada_em"]}, {"$set": alteracoes})
+    if not resultado.matched_count:
+        return jsonify({"erro": "A denúncia foi alterada. Atualize a lista e tente novamente"}), 409
+    documento.update(alteracoes)
+    return jsonify({"denuncia": serializar_denuncia(documento)}), 200
 def identificar_canal_youtube(url):
     """Converte formatos comuns de URL de canal nos filtros da YouTube API."""
     if not isinstance(url, str) or not url.strip():
