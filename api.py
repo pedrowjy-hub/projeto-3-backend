@@ -1255,7 +1255,33 @@ def criar_analise_youtube():
 @app.route("/analises/youtube", methods=["GET"])
 @jwt_required()
 def listar_historico_analises_youtube():
-    username = get_jwt_identity()
+    return responder_historico_youtube(get_jwt_identity())
+
+
+@app.route("/analises/youtube/<string:username>", methods=["GET"])
+@jwt_required()
+def listar_historico_youtube_por_influenciador(username):
+    usuarios = conectar_db()["tbl_usuarios"]
+    solicitante = usuarios.find_one(
+        {"username": get_jwt_identity()}, {"_id": 0, "tipo_perfil": 1}
+    )
+    if solicitante is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if solicitante.get("tipo_perfil") != "empresa" and not (
+        solicitante.get("tipo_perfil") == "influenciador"
+        and get_jwt_identity() == username
+    ):
+        return jsonify({"erro": "Acesso negado"}), 403
+
+    influenciador = usuarios.find_one(
+        {"username": username}, {"_id": 0, "tipo_perfil": 1}
+    )
+    if influenciador is None or influenciador.get("tipo_perfil") != "influenciador":
+        return jsonify({"erro": "Influenciador não encontrado"}), 404
+    return responder_historico_youtube(username)
+
+
+def responder_historico_youtube(username):
     documentos = list(
         conectar_db()["tbl_analises_influenciadores"].find(
             {"username": username, "plataforma": "youtube"},
