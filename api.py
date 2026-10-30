@@ -189,6 +189,8 @@ CAMPOS_PUBLICOS = {
     "nicho":1,
     "plataformas":1,
     "descricao":1,
+    "cidade":1,
+    "estado":1,
 }
 
 @app.route('/me', methods=['GET'])
@@ -284,6 +286,17 @@ def email_valido(email):
         email.strip()
     ) is not None
 
+def validar_localizacao(dados):
+    for campo in ("cidade", "estado"):
+        if campo not in dados:
+            continue
+        valor = dados[campo]
+        if not isinstance(valor, str) or len(valor.strip()) > 100:
+            return campo
+        dados[campo] = valor.strip()
+    return None
+
+
 def contato_valido(contato):
     if not isinstance(contato, str):
         return False
@@ -299,6 +312,10 @@ def criar_user():
 
     if not isinstance(novo_usuario,dict):
         return jsonify({"erro":"JSON inválido"}),400
+
+    campo_invalido = validar_localizacao(novo_usuario)
+    if campo_invalido:
+        return jsonify({"erro": f"{campo_invalido} deve ser um texto de até 100 caracteres"}), 400
 
     if "papel" in novo_usuario:
         return jsonify({"erro":"Papel é definido pelo servidor"}),400
@@ -387,9 +404,13 @@ def editar_user(username):
     if not isinstance(dados, dict) or not dados:
         return jsonify({"erro": "Envie ao menos um campo para editar"}), 400
 
+    campo_invalido = validar_localizacao(dados)
+    if campo_invalido:
+        return jsonify({"erro": f"{campo_invalido} deve ser um texto de até 100 caracteres"}), 422
+
     campos_editaveis = {
         "nome", "email", "contato", "tipo_perfil",
-        "nicho", "plataformas", "descricao",
+        "nicho", "plataformas", "descricao", "cidade", "estado",
     }
 
     if "email" in dados:
