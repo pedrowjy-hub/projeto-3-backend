@@ -2,36 +2,6 @@
 
 Este arquivo reúne apenas implementações e validações ainda pendentes.
 
-## Avaliações de influenciadores
-
-Adequar a rota de criação existente às regras abaixo e implementar as consultas
-de nota pública e comentários detalhados. O alvo deve ser um perfil
-com `tipo_perfil == "influenciador"`; caso contrário, retornar `404`.
-
-| Rota | Acesso | Regra |
-|---|---:|---|
-| `GET /usuarios/<username>/avaliacoes` | Público | Retorna somente `nota_media` e `quantidade_avaliacoes`. |
-| `GET /usuarios/<username>/avaliacoes/comentarios` | JWT | Apenas `papel == "admin"` ou empresa com assinatura ativa pode ver notas individuais e comentários. Empresa sem assinatura recebe `403`. |
-| `POST /usuarios/<username>/avaliacoes` | JWT | Apenas empresa pode avaliar; o avaliador vem de `get_jwt_identity()`, nunca do JSON. |
-
-O documento em `tbl_avaliacoes` deve guardar, no mínimo:
-
-```json
-{
-  "avaliador_username": "empresa_x",
-  "alvo_username": "influenciador_y",
-  "nota": 5,
-  "conteudo": "Ótima comunicação e bons resultados.",
-  "criado_em": "data ISO 8601"
-}
-```
-
-Não permitir autoavaliação. Também é recomendável limitar a uma avaliação por
-empresa e influenciador e, futuramente, exigir que exista um chat entre ambos.
-Os testes devem cobrir rating público, empresa assinante, empresa sem
-assinatura, influenciador bloqueado, admin, autor forjado no JSON e
-autoavaliação.
-
 ## Validação externa dos pagamentos — Paddle Sandbox
 
 - Executar um checkout fictício de ponta a ponta usando os túneis e o destino

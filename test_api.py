@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, call, patch
 from datetime import timedelta
 from bson import Binary, ObjectId
 from flask_jwt_extended import create_access_token, decode_token
+from pymongo.errors import DuplicateKeyError
+import api
 from api import app, bcrypt
 
 
@@ -13,6 +15,7 @@ def isolar_verificacao_de_conta_ativa(monkeypatch):
     # sem substituição em test_contas_ativas.py e nos fluxos de pagamento.
     monkeypatch.setattr(app.extensions["flask-jwt-extended"],
                         "_token_in_blocklist_callback", lambda _header, _payload: False)
+    monkeypatch.setattr(api, "_avaliacoes_indice_pronto", False)
 
 @pytest.mark.parametrize("metodo", ["post", "patch"])
 @pytest.mark.parametrize("contato,valido", [
@@ -95,6 +98,13 @@ def token_influenciador(monkeypatch):
     monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
     with app.app_context():
         return create_access_token(identity="influenciador_1")
+
+
+@pytest.fixture
+def token_empresa(monkeypatch):
+    monkeypatch.setitem(app.config, "JWT_SECRET_KEY", "chave-exclusiva-dos-testes-admin-1234567890")
+    with app.app_context():
+        return create_access_token(identity="empresa_1")
 
 
 def test_minha_conta_retorna_contato_da_conta_autenticada(token_usuario):
@@ -1588,172 +1598,326 @@ def test_chat_usuario_do_token_inexistente(mock_conectar_db, token_influenciador
     assert response.json == {"erro": "Usuário não encontrado"}
 
 
-def test_adicionar_avaliacao_201():
-    with patch('api.conectar_db') as conn:
-        colecao = conn.return_value.__getitem__.return_value
-
-        colecao.find_one.return_value = {
-            "username": "testeuser"
-        }
-
-        payload = {
-            "username": "rafacelduds",
-            "alvo": "testeuser",
-            "nota": 5,
-            "conteudo": "Trata o trabalho com seriedade"
-        }
-
-        response = app.test_client().post("/usuarios/testeuser/avaliacoes", json=payload)
-
-        assert response.status_code == 201
-        assert response.json == {"mensagem": "Avaliação feita com sucesso"}
-        colecao.insert_one.assert_called_once_with(payload)
-
-@pytest.mark.parametrize("payload", [None, [], "texto", 5])
-def test_adicionar_avaliacao_json_invalido(payload):
-    with patch("api.conectar_db") as conn:
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json=payload,
-        )
-
-        assert response.status_code == 400
-        assert response.json == {"erro": "JSON inválido"}
-        conn.assert_not_called()
-
-def test_adicionar_avaliacao_campos_ausentes():
-    with patch("api.conectar_db") as conn:
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json={"username": "rafacelduds"},
-        )
-
-        assert response.status_code == 400
-        assert response.json == {
-            "erro": "Campos obrigatórios ausentes",
-            "campos_faltantes": ["alvo", "nota", "conteudo"],
-        }
-        conn.assert_not_called()
-
-@pytest.mark.parametrize("campo", ["username", "alvo", "conteudo"])
-@pytest.mark.parametrize("valor", ["", "   ", None, 123, [], {}])
-def test_adicionar_avaliacao_campo_invalido(campo, valor):
-    with patch("api.conectar_db") as conn:
-        payload = {
-            "username": "rafacelduds",
-            "alvo": "testeuser",
-            "nota": 5,
-            "conteudo": "Trata o trabalho com seriedade",
-        }
-        payload[campo] = valor
-
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json=payload,
-        )
-
-        assert response.status_code == 422
-        assert response.json == {
-            "erro": f"Valor inválido para {campo}"
-        }
-        conn.assert_not_called()
-
-@pytest.mark.parametrize(
-    "nota",
-    [0, 6, -1, 3.5, "5", None, True, False, [], {}],
-)
-def test_adicionar_avaliacao_nota_invalida(nota):
-    with patch("api.conectar_db") as conn:
-        payload = {
-            "username": "rafacelduds",
-            "alvo": "testeuser",
-            "nota": nota,
-            "conteudo": "Trata o trabalho com seriedade",
-        }
-
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json=payload,
-        )
-
-        assert response.status_code == 422
-        assert response.json == {
-            "erro": "nota deve ser um inteiro entre 1 e 5"
-        }
-        conn.assert_not_called()
-
-def test_adicionar_avaliacao_alvo_diferente_da_url():
-    with patch("api.conectar_db") as conn:
-        payload = {
-            "username": "rafacelduds",
-            "alvo": "outro_usuario",
-            "nota": 5,
-            "conteudo": "Trata o trabalho com seriedade",
-        }
-
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json=payload,
-        )
-
-        assert response.status_code == 422
-        assert response.json == {
-            "erro": "alvo deve corresponder ao usuário da URL"
-        }
-        conn.assert_not_called()
-
-def test_adicionar_avaliacao_usuario_inexistente():
-    with patch("api.conectar_db") as conn:
-        db = conn.return_value
-        usuarios = db["tbl_testes"]
-        avaliacoes = db["tbl_avaliacoes"]
-
-        usuarios.find_one.return_value = None
-
-        payload = {
-            "username": "rafacelduds",
-            "alvo": "testeuser",
-            "nota": 5,
-            "conteudo": "Trata o trabalho com seriedade",
-        }
-
-        response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json=payload,
-        )
-
-        assert response.status_code == 404
-        assert response.json == {
-            "erro": "Usuário alvo não encontrado"
-        }
-        usuarios.find_one.assert_called_once_with(
-            {"username": "testeuser"}
-        )
-        avaliacoes.insert_one.assert_not_called()
+def preparar_colecoes_avaliacoes(mock_conectar_db):
+    db = MagicMock()
+    usuarios = MagicMock()
+    avaliacoes = MagicMock()
+    colecoes = {"tbl_usuarios": usuarios, "tbl_avaliacoes": avaliacoes}
+    db.__getitem__.side_effect = colecoes.__getitem__
+    mock_conectar_db.return_value = db
+    return usuarios, avaliacoes
 
 
-def test_adicionar_avaliacao_avaliador_inexistente():
-    with patch("api.conectar_db") as conn:
-        db = conn.return_value
-        usuarios = db["tbl_testes"]
+def test_resumo_avaliacoes_publico_retorna_media_e_quantidade():
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"username": "criador", "tipo_perfil": "influenciador"}
+        avaliacoes.aggregate.return_value = [{
+            "_id": None, "nota_media": 4.666666, "quantidade_avaliacoes": 3,
+        }]
+
+        response = app.test_client().get("/usuarios/criador/avaliacoes")
+
+    assert response.status_code == 200
+    assert response.json == {"nota_media": 4.67, "quantidade_avaliacoes": 3}
+    assert set(response.json) == {"nota_media", "quantidade_avaliacoes"}
+    avaliacoes.aggregate.assert_called_once_with([
+        {"$match": {"alvo_username": "criador"}},
+        {"$group": {
+            "_id": None,
+            "nota_media": {"$avg": "$nota"},
+            "quantidade_avaliacoes": {"$sum": 1},
+        }},
+    ])
+
+
+def test_resumo_avaliacoes_sem_registros_retorna_zero():
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"username": "criador", "tipo_perfil": "influenciador"}
+        avaliacoes.aggregate.return_value = []
+
+        response = app.test_client().get("/usuarios/criador/avaliacoes")
+
+    assert response.status_code == 200
+    assert response.json == {"nota_media": None, "quantidade_avaliacoes": 0}
+
+
+@pytest.mark.parametrize("usuario", [None, {"username": "empresa", "tipo_perfil": "empresa"}])
+def test_resumo_avaliacoes_oculta_alvo_inexistente_ou_que_nao_e_influenciador(usuario):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = usuario
+
+        response = app.test_client().get("/usuarios/alvo/avaliacoes")
+
+    assert response.status_code == 404
+    assert response.json == {"erro": "Influenciador não encontrado"}
+    avaliacoes.aggregate.assert_not_called()
+
+
+def test_comentarios_avaliacoes_exigem_token():
+    response = app.test_client().get("/usuarios/criador/avaliacoes/comentarios")
+    assert response.status_code == 401
+
+
+def test_comentarios_avaliacoes_permitidos_para_admin(token_admin):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
         usuarios.find_one.side_effect = [
-            {"username": "testeuser"},
-            None,
+            {"papel": "admin"},
+            {"username": "criador", "tipo_perfil": "influenciador"},
+        ]
+        avaliacoes.find.return_value.sort.return_value = [{
+            "avaliador_username": "empresa", "nota": 5, "conteudo": "Excelente parceria",
+            "criado_em": "2026-10-30T12:00:00Z",
+        }]
+
+        response = app.test_client().get(
+            "/usuarios/criador/avaliacoes/comentarios",
+            headers=cabecalho_autorizacao(token_admin),
+        )
+
+    assert response.status_code == 200
+    assert response.json == {"avaliacoes": [{
+        "avaliador_username": "empresa", "nota": 5, "conteudo": "Excelente parceria",
+        "criado_em": "2026-10-30T12:00:00Z",
+    }]}
+
+
+def test_comentarios_avaliacoes_permitidos_para_empresa_premium(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"tipo_perfil": "empresa", "assinatura": True, "expiracao_assinatura": "31-12-2099"},
+            {"username": "criador", "tipo_perfil": "influenciador"},
+        ]
+        avaliacoes.find.return_value.sort.return_value = []
+
+        response = app.test_client().get(
+            "/usuarios/criador/avaliacoes/comentarios",
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 200
+    assert response.json == {"avaliacoes": []}
+
+
+def test_comentarios_avaliacoes_negados_para_empresa_sem_premium(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "empresa", "assinatura": False}
+
+        response = app.test_client().get(
+            "/usuarios/criador/avaliacoes/comentarios",
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 403
+    avaliacoes.find.assert_not_called()
+
+
+def test_comentarios_avaliacoes_negados_para_influenciador(token_influenciador):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "influenciador"}
+
+        response = app.test_client().get(
+            "/usuarios/criador/avaliacoes/comentarios",
+            headers=cabecalho_autorizacao(token_influenciador),
+        )
+
+    assert response.status_code == 403
+    avaliacoes.find.assert_not_called()
+
+
+def test_adicionar_avaliacao_sem_token():
+    response = app.test_client().post(
+        "/usuarios/criador/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+    )
+    assert response.status_code == 401
+
+
+def test_adicionar_avaliacao_salva_autoria_do_token(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"username": "empresa_1", "tipo_perfil": "empresa"},
+            {"username": "criador", "tipo_perfil": "influenciador"},
+        ]
+        avaliacoes.find_one.return_value = None
+        payload = {
+            "nota": 5, "conteudo": "  Trata o trabalho com seriedade  ",
+            "username": "empresa_falsificada", "alvo": "outro_perfil",
+        }
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json=payload,
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 201
+    salvo = avaliacoes.insert_one.call_args.args[0]
+    assert salvo["avaliador_username"] == "empresa_1"
+    assert salvo["alvo_username"] == "criador"
+    assert salvo["nota"] == 5
+    assert salvo["conteudo"] == "Trata o trabalho com seriedade"
+    assert salvo["criado_em"].endswith("Z")
+    assert "username" not in salvo
+    assert "alvo" not in salvo
+
+
+def test_adicionar_avaliacao_negada_para_influenciador(token_influenciador):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "influenciador"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_influenciador),
+        )
+
+    assert response.status_code == 403
+    avaliacoes.insert_one.assert_not_called()
+
+
+def test_adicionar_avaliacao_rejeita_alvo_que_nao_e_influenciador(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"tipo_perfil": "empresa"},
+            {"username": "alvo", "tipo_perfil": "empresa"},
         ]
 
         response = app.test_client().post(
-            "/usuarios/testeuser/avaliacoes",
-            json={
-                "username": "rafacelduds",
-                "alvo": "testeuser",
-                "nota": 5,
-                "conteudo": "Trata o trabalho com seriedade",
-            },
+            "/usuarios/alvo/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_empresa),
         )
 
-        assert response.status_code == 404
-        assert response.json == {"erro": "Usuário criador não encontrado"}
-        db["tbl_avaliacoes"].insert_one.assert_not_called()
+    assert response.status_code == 404
+    avaliacoes.insert_one.assert_not_called()
+
+
+def test_adicionar_avaliacao_bloqueia_autoavaliacao(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"tipo_perfil": "empresa"},
+            {"username": "empresa_1", "tipo_perfil": "influenciador"},
+        ]
+
+        response = app.test_client().post(
+            "/usuarios/empresa_1/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 403
+    avaliacoes.insert_one.assert_not_called()
+
+
+def test_adicionar_avaliacao_empresa_nao_pode_avaliar_duas_vezes(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"tipo_perfil": "empresa"},
+            {"username": "criador", "tipo_perfil": "influenciador"},
+        ]
+        avaliacoes.find_one.return_value = {"_id": "existente"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 409
+    avaliacoes.insert_one.assert_not_called()
+
+
+def test_adicionar_avaliacao_lida_com_duplicidade_simultanea(token_empresa):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.side_effect = [
+            {"tipo_perfil": "empresa"},
+            {"username": "criador", "tipo_perfil": "influenciador"},
+        ]
+        avaliacoes.find_one.return_value = None
+        avaliacoes.insert_one.side_effect = DuplicateKeyError("duplicate rating")
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json={"nota": 5, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 409
+    assert response.json == {"erro": "Esta empresa já avaliou este influenciador"}
+
+
+@pytest.mark.parametrize("payload", [None, [], "texto", 5])
+def test_adicionar_avaliacao_json_invalido(token_empresa, payload):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "empresa"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json=payload,
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 400
+    assert response.json == {"erro": "JSON inválido"}
+    avaliacoes.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize("payload,campos", [
+    ({}, ["nota", "conteudo"]),
+    ({"nota": 5}, ["conteudo"]),
+    ({"conteudo": "Boa parceria"}, ["nota"]),
+])
+def test_adicionar_avaliacao_rejeita_campos_ausentes(token_empresa, payload, campos):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "empresa"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json=payload,
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 400
+    assert response.json["campos_faltantes"] == campos
+    avaliacoes.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize("nota", [0, 6, -1, 3.5, "5", None, True, False, [], {}])
+def test_adicionar_avaliacao_rejeita_nota_invalida(token_empresa, nota):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "empresa"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json={"nota": nota, "conteudo": "Boa parceria"},
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 422
+    assert response.json == {"erro": "nota deve ser um inteiro entre 1 e 5"}
+    avaliacoes.insert_one.assert_not_called()
+
+
+@pytest.mark.parametrize("conteudo", ["", "   ", None, 123, [], {}])
+def test_adicionar_avaliacao_rejeita_conteudo_invalido(token_empresa, conteudo):
+    with patch("api.conectar_db") as mock_conectar_db:
+        usuarios, avaliacoes = preparar_colecoes_avaliacoes(mock_conectar_db)
+        usuarios.find_one.return_value = {"tipo_perfil": "empresa"}
+
+        response = app.test_client().post(
+            "/usuarios/criador/avaliacoes", json={"nota": 5, "conteudo": conteudo},
+            headers=cabecalho_autorizacao(token_empresa),
+        )
+
+    assert response.status_code == 422
+    assert response.json == {"erro": "Valor inválido para conteudo"}
+    avaliacoes.insert_one.assert_not_called()
 
 # Testes das rotas de postagem
 ID_USUARIO_POSTAGEM = ObjectId("507f1f77bcf86cd799439011")

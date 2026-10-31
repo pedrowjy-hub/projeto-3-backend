@@ -97,6 +97,30 @@ aplicam à edição. Exclusão e substituição removem os arquivos extras assoc
 O primeiro arquivo fica no documento da postagem e os demais em
 `tbl_midias_postagens`, evitando ultrapassar os 16 MB por documento do MongoDB.
 
+## Avaliações de influenciadores
+
+`GET /usuarios/<username>/avaliacoes` é público e retorna somente
+`nota_media` (número arredondado a duas casas ou `null` sem avaliações) e
+`quantidade_avaliacoes`. O alvo precisa existir e ter `tipo_perfil` igual a
+`influenciador`.
+
+`GET /usuarios/<username>/avaliacoes/comentarios` exige JWT e só permite acesso
+a administradores e empresas com assinatura Premium ativa. Retorna uma lista
+em `avaliacoes` com username da empresa, nota, comentário e data. Influenciadores
+e empresas sem Premium recebem `403`.
+
+`POST /usuarios/<username>/avaliacoes` exige JWT de uma empresa e recebe
+`{"nota":5,"conteudo":"Ótima comunicação e bons resultados."}`. O avaliador é
+sempre obtido do token. A nota deve ser um inteiro de 1 a 5, o comentário tem
+limite de 2.000 caracteres e uma empresa só pode avaliar cada influenciador
+uma vez. O MongoDB cria um índice único parcial para proteger essa regra mesmo
+com requisições simultâneas. Autoavaliações e alvos que não sejam
+influenciadores são recusados.
+
+Documentos antigos que usam os campos `username` e `alvo` não são incluídos
+nas consultas: a rota anterior aceitava esses valores sem autenticação, então
+não é possível confirmar a autoria com segurança.
+
 ## Acesso Premium ao chat
 
 Todas as operações de chat exigem JWT, participação na conversa e assinatura

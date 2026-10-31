@@ -2,6 +2,7 @@ import os
 import re
 from io import BytesIO
 from functools import lru_cache,wraps
+from threading import Lock
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_jwt_extended import (
@@ -831,54 +832,159 @@ def adicionar_arquivo(id_influenciador, id_empresa):
         return jsonify({"erro": "Chat não encontrado"}), 404
     return jsonify({"mensagem": "Arquivo adicionado com sucesso"}), 201
 
-@app.route("/usuarios/<string:username>/avaliacoes", methods=['POST'])
-def avaliar(username):
-    dados = request.get_json(silent=True)
+def buscar_influenciador_avaliacoes(db, username):
+    usuario = db["tbl_usuarios"].find_one(
+        {"username": username, "ativo": {"$ne": False}},
+        {"_id": 0, "username": 1, "tipo_perfil": 1},
+    )
+    if usuario is None or usuario.get("tipo_perfil") != "influenciador":
+        return None
+    return usuario
 
+
+_avaliacoes_indice_lock = Lock()
+_avaliacoes_indice_pronto = False
+
+
+def garantir_indice_avaliacoes(colecao):
+    global _avaliacoes_indice_pronto
+    if _avaliacoes_indice_pronto:
+        return
+    with _avaliacoes_indice_lock:
+        if _avaliacoes_indice_pronto:
+            return
+        colecao.create_index(
+            [("avaliador_username", 1), ("alvo_username", 1)],
+            unique=True,
+            name="uniq_avaliacoes_avaliador_alvo",
+            partialFilterExpression={
+                "avaliador_username": {"$type": "string"},
+                "alvo_username": {"$type": "string"},
+            },
+        )
+        _avaliacoes_indice_pronto = True
+
+
+@app.route("/usuarios/<string:username>/avaliacoes", methods=["GET"])
+def consultar_resumo_avaliacoes(username):
+    db = conectar_db()
+    if buscar_influenciador_avaliacoes(db, username) is None:
+        return jsonify({"erro": "Influenciador não encontrado"}), 404
+
+    resumo = next(iter(db["tbl_avaliacoes"].aggregate([
+        {"$match": {"alvo_username": username}},
+        {"$group": {
+            "_id": None,
+            "nota_media": {"$avg": "$nota"},
+            "quantidade_avaliacoes": {"$sum": 1},
+        }},
+    ])), None)
+    return jsonify({
+        "nota_media": round(resumo["nota_media"], 2) if resumo else None,
+        "quantidade_avaliacoes": resumo["quantidade_avaliacoes"] if resumo else 0,
+    }), 200
+
+
+@app.route("/usuarios/<string:username>/avaliacoes/comentarios", methods=["GET"])
+@jwt_required()
+def consultar_comentarios_avaliacoes(username):
+    db = conectar_db()
+    identidade = get_jwt_identity()
+    solicitante = db["tbl_usuarios"].find_one(
+        {"username": identidade, "ativo": {"$ne": False}},
+        {"_id": 0, "papel": 1, "tipo_perfil": 1, "pagamento": 1,
+         "assinatura": 1, "expiracao_assinatura": 1, "premium_ate": 1},
+    )
+    if solicitante is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+
+    eh_admin = solicitante.get("papel") == "admin"
+    eh_empresa_premium = (
+        solicitante.get("tipo_perfil") == "empresa"
+        and assinatura_premium_ativa(solicitante)
+    )
+    if not eh_admin and not eh_empresa_premium:
+        return jsonify({"erro": "Acesso restrito a empresas Premium e administradores"}), 403
+
+    if buscar_influenciador_avaliacoes(db, username) is None:
+        return jsonify({"erro": "Influenciador não encontrado"}), 404
+
+    registros = db["tbl_avaliacoes"].find(
+        {"alvo_username": username},
+        {"_id": 0, "avaliador_username": 1, "nota": 1, "conteudo": 1, "criado_em": 1},
+    ).sort("criado_em", -1)
+    comentarios = [{
+        "avaliador_username": item.get("avaliador_username"),
+        "nota": item.get("nota"),
+        "conteudo": item.get("conteudo"),
+        "criado_em": item.get("criado_em"),
+    } for item in registros]
+    return jsonify({"avaliacoes": comentarios}), 200
+
+
+@app.route("/usuarios/<string:username>/avaliacoes", methods=["POST"])
+@jwt_required()
+def avaliar(username):
+    db = conectar_db()
+    identidade = get_jwt_identity()
+    avaliador = db["tbl_usuarios"].find_one(
+        {"username": identidade, "ativo": {"$ne": False}},
+        {"_id": 0, "username": 1, "tipo_perfil": 1},
+    )
+    if avaliador is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 401
+    if avaliador.get("tipo_perfil") != "empresa":
+        return jsonify({"erro": "Somente empresas podem avaliar influenciadores"}), 403
+
+    dados = request.get_json(silent=True)
     if not isinstance(dados, dict):
         return jsonify({"erro": "JSON inválido"}), 400
 
-    campos_obrigatorios = ["username", "alvo", "nota", "conteudo"]
+    campos_obrigatorios = ["nota", "conteudo"]
     campos_faltantes = [campo for campo in campos_obrigatorios if campo not in dados]
-
     if campos_faltantes:
         return jsonify({
             "erro": "Campos obrigatórios ausentes",
             "campos_faltantes": campos_faltantes,
         }), 400
-
-    for campo in ["username", "alvo", "conteudo"]:
-        if not isinstance(dados[campo], str) or not dados[campo].strip():
-            return jsonify({"erro": f"Valor inválido para {campo}"}), 422
-
     if type(dados["nota"]) is not int or not 1 <= dados["nota"] <= 5:
         return jsonify({"erro": "nota deve ser um inteiro entre 1 e 5"}), 422
+    if not isinstance(dados["conteudo"], str) or not dados["conteudo"].strip():
+        return jsonify({"erro": "Valor inválido para conteudo"}), 422
+    conteudo = dados["conteudo"].strip()
+    if len(conteudo) > 2000:
+        return jsonify({"erro": "conteudo deve ter no máximo 2000 caracteres"}), 422
 
-    if dados["alvo"] != username:
-        return jsonify({
-            "erro": "alvo deve corresponder ao usuário da URL"
-        }), 422
+    influenciador = buscar_influenciador_avaliacoes(db, username)
+    if influenciador is None:
+        return jsonify({"erro": "Influenciador não encontrado"}), 404
+    if identidade == username:
+        return jsonify({"erro": "Não é permitido avaliar o próprio perfil"}), 403
 
-    db = conectar_db()
+    colecao = db["tbl_avaliacoes"]
+    try:
+        garantir_indice_avaliacoes(colecao)
+        if colecao.find_one({
+            "avaliador_username": identidade,
+            "alvo_username": username,
+        }):
+            return jsonify({"erro": "Esta empresa já avaliou este influenciador"}), 409
 
-    usuario_alvo = db["tbl_usuarios"].find_one({"username": username})
+        avaliacao = {
+            "avaliador_username": identidade,
+            "alvo_username": username,
+            "nota": dados["nota"],
+            "conteudo": conteudo,
+            "criado_em": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+        colecao.insert_one(avaliacao)
+    except DuplicateKeyError:
+        return jsonify({"erro": "Esta empresa já avaliou este influenciador"}), 409
 
-    if usuario_alvo is None:
-        return jsonify({"erro": "Usuário alvo não encontrado"}), 404
-
-    usuario_avaliador = db["tbl_usuarios"].find_one({"username": dados["username"]})
-
-    if usuario_avaliador is None:
-        return jsonify({"erro": "Usuário criador não encontrado"}), 404
-
-    avaliacao = {
-        campo: dados[campo]
-        for campo in campos_obrigatorios
-    }
-
-    db["tbl_avaliacoes"].insert_one(avaliacao)
-
-    return jsonify({"mensagem": "Avaliação feita com sucesso"}), 201
+    return jsonify({
+        "mensagem": "Avaliação feita com sucesso",
+        "avaliacao": avaliacao,
+    }), 201
 
 @app.route("/admin", methods=['GET'])
 @admin_required
