@@ -88,3 +88,39 @@ def test_cadastro_define_ativo_no_servidor(context):
     data = {"nome": "Nova", "username": "nova", "email": "nova@example.com", "contato": "11999999999", "tipo_perfil": "empresa", "nicho": "moda", "plataformas": ["Instagram"], "senha": "senha-teste", "ativo": False}
     assert client.post("/usuarios", json=data).status_code == 201
     assert db["tbl_usuarios"].insert_one.call_args.args[0]["ativo"] is True
+
+
+@pytest.mark.parametrize("route", ["/admin/usuarios", "/admin/usuario/ana"])
+@pytest.mark.parametrize("subscription,expected", [
+    ({"pagamento": {"status": "active", "premium_ate": "2099-01-01T00:00:00Z"}}, True),
+    ({"assinatura": False, "pagamento": {"status": "active", "premium_ate": "2099-01-01T00:00:00Z"}}, True),
+    ({"assinatura": True, "pagamento": {"status": "active", "premium_ate": "2000-01-01T00:00:00Z"}}, False),
+    ({"pagamento": {"status": "canceled", "premium_ate": "2099-01-01T00:00:00Z"}}, True),
+    ({"pagamento": {"status": "paused", "premium_ate": "2099-01-01T00:00:00Z"}}, False),
+    ({"assinatura": True, "expiracao_assinatura": "31-12-2099"}, True),
+    ({"assinatura": True, "expiracao_assinatura": "01-01-2000"}, False),
+    ({}, False),
+])
+def test_admin_retorna_assinatura_calculada(context, route, subscription, expected):
+    client, db, users, headers = context
+    users["ana"].update(subscription)
+    # MongoDB aplica esta projeção antes de retornar o documento.
+    document = {key: value for key, value in users["ana"].items() if key != "senha"}
+    db["tbl_usuarios"].find.return_value = [document]
+    auth = headers("admin")
+    original_find = db["tbl_usuarios"].find_one.side_effect
+
+    def find(query, projection=None):
+        if projection is not None and query.get("username") == "ana":
+            return document
+        return original_find(query)
+
+    db["tbl_usuarios"].find_one.side_effect = find
+    response = client.get(route, headers=auth)
+    assert response.status_code == 200
+    account = response.json[0] if isinstance(response.json, list) else response.json
+    assert account["assinatura"] is expected
+    assert "pagamento" not in account
+    assert "senha" not in account
+    assert document == {key: value for key, value in users["ana"].items() if key != "senha"}
+    db["tbl_usuarios"].update_one.assert_not_called()

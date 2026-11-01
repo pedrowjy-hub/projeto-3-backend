@@ -991,6 +991,14 @@ def avaliar(username):
 def admin_panel():    
     return jsonify({"mensagem": "Acesso concedido, bem-vindo chefe"}), 200
 
+def serializar_usuario_admin(usuario):
+    dados = {**usuario, **campos_assinatura(usuario)}
+    dados.pop("pagamento", None)
+    if "pagamento" in usuario:
+        dados.pop("expiracao_assinatura", None)
+    return dados
+
+
 @app.route("/admin/usuarios",methods=["GET"])
 @admin_required
 def admin_listar_user():
@@ -1002,7 +1010,7 @@ def admin_listar_user():
         }
     ))
 
-    return jsonify(usuarios),200
+    return jsonify([serializar_usuario_admin(usuario) for usuario in usuarios]),200
 
 @app.route("/admin/usuarios/<string:username>/status", methods=["PATCH"])
 @admin_required
@@ -1036,7 +1044,7 @@ def admin_busca_user(username):
     
     if usuario is None:
         return jsonify({"erro": "Usuário não encontrado"}), 404
-    return jsonify(usuario), 200
+    return jsonify(serializar_usuario_admin(usuario)), 200
         
 @app.route("/admin",methods=["POST"])
 @admin_required

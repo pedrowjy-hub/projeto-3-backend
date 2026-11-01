@@ -444,10 +444,11 @@ def test_admin_lista_usuarios_permitida(client, token_admin):
         )
 
         assert response.status_code == 200
-        assert response.json == [
+        assert [{key: user[key] for key in ("username", "papel")} for user in response.json] == [
             {"username": "empresa_1", "papel": "usuario"},
             {"username": "influenciador_1", "papel": "usuario"},
         ]
+        assert all(user["assinatura"] is False for user in response.json)
         colecao.find_one.assert_called_once_with(
             {"username": "testeadmin"}, {"_id": 0}
         )
@@ -498,7 +499,8 @@ def test_admin_busca_usuario_permitida(client, token_admin):
         )
 
         assert response.status_code == 200
-        assert response.json == usuario
+        assert {key: response.json[key] for key in usuario} == usuario
+        assert response.json["assinatura"] is False
         assert colecao.find_one.call_args_list == [
             call({"username": "testeadmin"}, {"_id": 0}),
             call(
