@@ -1,5 +1,12 @@
 # projeto-3-backend
 
+## Deploy na AWS
+
+- Frontend React: [http://35.175.183.126/](http://35.175.183.126/)
+- API: [http://35.175.183.126/api/usuarios](http://35.175.183.126/api/usuarios)
+
+As rotas da API são acessadas pelo prefixo `/api` no endereço público.
+
 ## Assinatura eletrônica de contratos
 
 Integração Dropbox Sign exclusiva de teste, com PDF, dois participantes Premium,
