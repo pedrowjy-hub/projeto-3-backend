@@ -6,3 +6,4 @@ flask_cors
 Flask-JWT-Extended
 flask_bcrypt
 requests>=2.32,<3
+Pillow>=11,<13

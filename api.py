@@ -1,3 +1,4 @@
+from fotos_perfil import normalizar_foto
 import os
 import re
 import hashlib
@@ -199,6 +200,7 @@ CAMPOS_PUBLICOS = {
     "nicho":1,
     "plataformas":1,
     "descricao":1,
+    "foto_perfil":1,
     "cidade":1,
     "estado":1,
 }
@@ -351,6 +353,12 @@ def criar_user():
     if campo_invalido:
         return jsonify({"erro": f"{campo_invalido} deve ser um texto de até 100 caracteres"}), 400
 
+    if "foto_perfil" in novo_usuario:
+        try:
+            novo_usuario["foto_perfil"] = normalizar_foto(novo_usuario["foto_perfil"])
+        except ValueError as erro:
+            return jsonify({"erro": str(erro)}), 400
+
     if "papel" in novo_usuario:
         return jsonify({"erro":"Papel é definido pelo servidor"}),400
 
@@ -442,9 +450,15 @@ def editar_user(username):
     if campo_invalido:
         return jsonify({"erro": f"{campo_invalido} deve ser um texto de até 100 caracteres"}), 422
 
+    if "foto_perfil" in dados:
+        try:
+            dados["foto_perfil"] = normalizar_foto(dados["foto_perfil"])
+        except ValueError as erro:
+            return jsonify({"erro": str(erro)}), 400
+
     campos_editaveis = {
         "nome", "email", "contato", "tipo_perfil",
-        "nicho", "plataformas", "descricao", "cidade", "estado",
+        "nicho", "plataformas", "descricao", "cidade", "estado", "foto_perfil",
     }
 
     if "email" in dados:
