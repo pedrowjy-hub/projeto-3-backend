@@ -214,3 +214,25 @@ YOUTUBE_API_KEY=sua-chave-da-youtube-data-api
 
 A YouTube Data API usa cotas por projeto. O endpoint faz até três consultas
 para cada análise: canal, playlist de envios e estatísticas dos vídeos.
+
+## Recuperação e alteração de senha
+
+`POST /recuperar-senha` recebe `{"email":"pessoa@exemplo.com"}`. Para contas
+ativas, envia um link com token de uso único, válido por 30 minutos. O token é
+armazenado apenas como hash; respostas para e-mails sem conta usam a mesma
+mensagem para não revelar se o endereço está cadastrado. Há um intervalo mínimo
+de um minuto entre solicitações para a mesma conta.
+
+`POST /redefinir-senha` recebe `{"token":"...","nova_senha":"..."}`. Tokens
+inválidos, expirados ou já usados são recusados. Após redefinir a senha, os
+tokens de login anteriores deixam de funcionar.
+
+`PATCH /usuarios/me/senha` exige JWT e recebe
+`{"senha_atual":"...","nova_senha":"..."}`. A senha atual é validada e,
+após a alteração, o usuário precisa entrar novamente.
+
+O envio de e-mail usa SMTP da biblioteca padrão. Configure `SMTP_HOST` e
+`SMTP_FROM`; `SMTP_PORT` usa 587 por padrão, `SMTP_USE_TLS` usa TLS por padrão,
+e `SMTP_USER`/`SMTP_PASSWORD` são opcionais para relays sem autenticação.
+`FRONTEND_URL` define o domínio do link (padrão `http://localhost:5173`), cuja
+tela de redefinição deve ler o parâmetro `token` em `/redefinir-senha`.

@@ -1,8 +1,12 @@
 import os
 import re
+import hashlib
+import secrets
+import smtplib
 from io import BytesIO
 from functools import lru_cache,wraps
 from threading import Lock
+from email.message import EmailMessage
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 from flask_jwt_extended import (
@@ -15,13 +19,15 @@ from uuid import uuid4
 from pagamentos import ErroPagamento, configuracao_paddle, requisitar_paddle, validar_preco, validar_transacao
 from assinaturas import verificar_evento, processar_evento, cancelar_renovacao, premium_ativo, campos_assinatura, CAMPOS_LEGADOS
 from bson import ObjectId, Binary
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from datetime import datetime, timezone, timedelta
 from flask_bcrypt import Bcrypt
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlencode
 import requests
 
-load_dotenv()
+ARQUIVO_ENV = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(ARQUIVO_ENV)
+VALORES_ENV_LOCAL = dotenv_values(ARQUIVO_ENV)
 app =  Flask(__name__)
 CORS(app)
 bcrypt = Bcrypt(app)
@@ -174,12 +180,14 @@ def admin_required(func):
 @jwt.token_in_blocklist_loader
 def token_conta_desativada(_header, payload):
     usuario = conectar_db()["tbl_usuarios"].find_one({"username": payload["sub"]})
-    return usuario is None or usuario.get("ativo", True) is False
+    if usuario is None or usuario.get("ativo", True) is False:
+        return True
+    return payload.get("versao_senha", 0) != usuario.get("versao_senha", 0)
 
 
 @jwt.revoked_token_loader
 def conta_desativada_response(_header, _payload):
-    return jsonify({"erro": "Conta desativada ou indisponível. Entre em contato com a administração."}), 401
+    return jsonify({"erro": "Sessão inválida, conta desativada ou senha alterada. Entre novamente."}), 401
 
 
 TIPO_PERFIL = {"empresa","influenciador"}
@@ -653,8 +661,225 @@ def login():
         return jsonify({"erro": "Conta desativada. Entre em contato com a administração."}), 403
 
     token = create_access_token(identity=usuario["username"],
-                                additional_claims={"email":usuario["email"]})
+                                additional_claims={
+                                    "email": usuario["email"],
+                                    "versao_senha": usuario.get("versao_senha", 0),
+                                })
     return jsonify(access_token = token),200
+
+
+TEMPO_EXPIRACAO_RECUPERACAO = timedelta(minutes=30)
+INTERVALO_RECUPERACAO = timedelta(minutes=1)
+CAMPOS_RECUPERACAO_SENHA = (
+    "token_recuperacao_senha",
+    "token_recuperacao_senha_expira_em",
+    "recuperacao_senha_solicitada_em",
+)
+
+
+def hash_token_recuperacao(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def valor_configuracao_email(nome, padrao=""):
+    valor = os.getenv(nome)
+    if isinstance(valor, str) and valor.strip():
+        return valor.strip()
+    valor = VALORES_ENV_LOCAL.get(nome)
+    if isinstance(valor, str) and valor.strip():
+        return valor.strip()
+    return padrao
+
+
+def configuracao_email_recuperacao():
+    host = valor_configuracao_email("SMTP_HOST")
+    remetente = valor_configuracao_email("SMTP_FROM")
+    if not host or not remetente:
+        return None
+    try:
+        porta = int(valor_configuracao_email("SMTP_PORT", "587"))
+    except ValueError:
+        return None
+    if not 1 <= porta <= 65535:
+        return None
+    return {
+        "host": host,
+        "porta": porta,
+        "remetente": remetente,
+        "usuario": valor_configuracao_email("SMTP_USER"),
+        "senha": valor_configuracao_email("SMTP_PASSWORD"),
+        "tls": valor_configuracao_email("SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"},
+        "frontend_url": valor_configuracao_email("FRONTEND_URL", "http://localhost:5173").rstrip("/"),
+    }
+
+
+def enviar_email_recuperacao(destinatario, token, configuracao):
+    parametros = urlencode({"token": token})
+    link = f"{configuracao['frontend_url']}/redefinir-senha?{parametros}"
+    mensagem = EmailMessage()
+    mensagem["Subject"] = "Redefinição de senha"
+    mensagem["From"] = configuracao["remetente"]
+    mensagem["To"] = destinatario
+    mensagem.set_content(
+        "Recebemos uma solicitação para redefinir sua senha.\n\n"
+        f"Acesse este link para escolher uma nova senha: {link}\n\n"
+        "O link expira em 30 minutos e só pode ser usado uma vez. "
+        "Se você não solicitou a alteração, ignore este e-mail."
+    )
+
+    if configuracao["porta"] == 465:
+        with smtplib.SMTP_SSL(configuracao["host"], configuracao["porta"], timeout=10) as servidor:
+            if configuracao["usuario"]:
+                servidor.login(configuracao["usuario"], configuracao["senha"])
+            servidor.send_message(mensagem)
+        return
+
+    with smtplib.SMTP(configuracao["host"], configuracao["porta"], timeout=10) as servidor:
+        if configuracao["tls"]:
+            servidor.starttls()
+        if configuracao["usuario"]:
+            servidor.login(configuracao["usuario"], configuracao["senha"])
+        servidor.send_message(mensagem)
+
+
+def resposta_recuperacao_solicitada():
+    return jsonify({
+        "mensagem": "Se houver uma conta ativa com esse e-mail, enviaremos as instruções para redefinir a senha."
+    }), 202
+
+
+@app.route("/recuperar-senha", methods=["POST"])
+def solicitar_recuperacao_senha():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    email = dados.get("email")
+    if not isinstance(email, str) or not email_valido(email.strip()):
+        return jsonify({"erro": "Informe um e-mail válido"}), 400
+
+    configuracao = configuracao_email_recuperacao()
+    if configuracao is None:
+        return jsonify({"erro": "O serviço de e-mail de recuperação não está configurado"}), 503
+
+    email = email.strip()
+    colecao = conectar_db()["tbl_usuarios"]
+    usuario = colecao.find_one({
+        "email": {"$regex": f"^{re.escape(email)}$", "$options": "i"},
+        "papel": {"$in": ["usuario", "admin"]},
+        "ativo": {"$ne": False},
+    })
+    if usuario is None:
+        return resposta_recuperacao_solicitada()
+
+    agora = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(32)
+    hash_token = hash_token_recuperacao(token)
+    atualizacao = colecao.update_one(
+        {
+            "_id": usuario["_id"],
+            "$or": [
+                {"recuperacao_senha_solicitada_em": {"$exists": False}},
+                {"recuperacao_senha_solicitada_em": {"$lte": agora - INTERVALO_RECUPERACAO}},
+            ],
+        },
+        {"$set": {
+            "token_recuperacao_senha": hash_token,
+            "token_recuperacao_senha_expira_em": agora + TEMPO_EXPIRACAO_RECUPERACAO,
+            "recuperacao_senha_solicitada_em": agora,
+        }},
+    )
+    if atualizacao.matched_count == 0:
+        return resposta_recuperacao_solicitada()
+
+    try:
+        enviar_email_recuperacao(email, token, configuracao)
+    except (OSError, smtplib.SMTPException):
+        app.logger.exception("Falha ao enviar e-mail de recuperação de senha")
+        colecao.update_one(
+            {"_id": usuario["_id"], "token_recuperacao_senha": hash_token},
+            {"$unset": {
+                "token_recuperacao_senha": "",
+                "token_recuperacao_senha_expira_em": "",
+                "recuperacao_senha_solicitada_em": "",
+            }},
+        )
+
+    return resposta_recuperacao_solicitada()
+
+
+@app.route("/redefinir-senha", methods=["POST"])
+def redefinir_senha():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    token = dados.get("token")
+    nova_senha = dados.get("nova_senha")
+    if not isinstance(token, str) or not token.strip():
+        return jsonify({"erro": "Token de recuperação obrigatório"}), 400
+    if not isinstance(nova_senha, str) or not nova_senha:
+        return jsonify({"erro": "Nova senha obrigatória"}), 400
+
+    agora = datetime.now(timezone.utc)
+    senha_hash = bcrypt.generate_password_hash(nova_senha).decode("utf-8")
+    resultado = conectar_db()["tbl_usuarios"].update_one(
+        {
+            "token_recuperacao_senha": hash_token_recuperacao(token),
+            "token_recuperacao_senha_expira_em": {"$gt": agora},
+            "papel": {"$in": ["usuario", "admin"]},
+            "ativo": {"$ne": False},
+        },
+        {
+            "$set": {"senha": senha_hash},
+            "$inc": {"versao_senha": 1},
+            "$unset": {campo: "" for campo in CAMPOS_RECUPERACAO_SENHA},
+        },
+    )
+    if resultado.matched_count == 0:
+        return jsonify({"erro": "Token inválido ou expirado"}), 400
+
+    return jsonify({"mensagem": "Senha redefinida com sucesso. Entre novamente na sua conta."}), 200
+
+
+@app.route("/usuarios/me/senha", methods=["PATCH"])
+@jwt_required()
+def alterar_senha_logado():
+    dados = request.get_json(silent=True)
+    if not isinstance(dados, dict):
+        return jsonify({"erro": "JSON inválido"}), 400
+
+    senha_atual = dados.get("senha_atual")
+    nova_senha = dados.get("nova_senha")
+    if not isinstance(senha_atual, str) or not senha_atual:
+        return jsonify({"erro": "Senha atual obrigatória"}), 400
+    if not isinstance(nova_senha, str) or not nova_senha:
+        return jsonify({"erro": "Nova senha obrigatória"}), 400
+    if senha_atual == nova_senha:
+        return jsonify({"erro": "A nova senha deve ser diferente da senha atual"}), 400
+
+    colecao = conectar_db()["tbl_usuarios"]
+    usuario = colecao.find_one(
+        {"username": get_jwt_identity(), "ativo": {"$ne": False}},
+        {"senha": 1},
+    )
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado"}), 404
+    if not bcrypt.check_password_hash(usuario.get("senha", ""), senha_atual):
+        return jsonify({"erro": "Senha atual incorreta"}), 401
+
+    resultado = colecao.update_one(
+        {"_id": usuario["_id"], "senha": usuario["senha"]},
+        {
+            "$set": {"senha": bcrypt.generate_password_hash(nova_senha).decode("utf-8")},
+            "$inc": {"versao_senha": 1},
+            "$unset": {campo: "" for campo in CAMPOS_RECUPERACAO_SENHA},
+        },
+    )
+    if resultado.modified_count == 0:
+        return jsonify({"erro": "A senha foi alterada durante a solicitação. Tente novamente."}), 409
+
+    return jsonify({"mensagem": "Senha alterada com sucesso. Entre novamente na sua conta."}), 200
 
 def assinatura_premium_ativa(usuario, hoje=None):
     if "pagamento" in usuario or "premium_ate" in usuario:
