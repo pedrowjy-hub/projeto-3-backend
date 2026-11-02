@@ -13,7 +13,7 @@ from preferencias import validar_preferencias, preferencias_usuario
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from uuid import uuid4
 from pagamentos import ErroPagamento, configuracao_paddle, requisitar_paddle, validar_preco, validar_transacao
-from assinaturas import verificar_evento, processar_evento, cancelar_renovacao, premium_ativo, campos_assinatura, CAMPOS_LEGADOS
+from assinaturas import verificar_evento, processar_evento, cancelar_renovacao, premium_ativo, campos_assinatura, CAMPOS_LEGADOS, dados_pagamento, data_utc, iso
 from bson import ObjectId, Binary
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
@@ -993,6 +993,8 @@ def admin_panel():
 
 def serializar_usuario_admin(usuario):
     dados = {**usuario, **campos_assinatura(usuario)}
+    dados.pop("senha", None)
+    dados.pop("_id", None)
     dados.pop("pagamento", None)
     if "pagamento" in usuario:
         dados.pop("expiracao_assinatura", None)
@@ -1011,6 +1013,47 @@ def admin_listar_user():
     ))
 
     return jsonify([serializar_usuario_admin(usuario) for usuario in usuarios]),200
+
+@app.route("/admin/usuarios/<string:username>/assinatura", methods=["PATCH"])
+@admin_required
+def admin_alterar_assinatura(username):
+    dados = request.get_json(silent=True)
+    if (not isinstance(dados, dict)
+            or set(dados) != {"ativa", "premium_ate", "senha"}
+            or type(dados.get("ativa")) is not bool):
+        return jsonify({"erro": "Informe ativa, premium_ate e sua senha atual."}), 400
+    if not isinstance(dados["senha"], str) or not dados["senha"]:
+        return jsonify({"erro": "Informe sua senha atual."}), 400
+    fim = data_utc(dados["premium_ate"])
+    if dados["ativa"] and (fim is None or fim <= datetime.now(timezone.utc)):
+        return jsonify({"erro": "Informe uma validade futura com fuso horário."}), 400
+    if not dados["ativa"] and dados["premium_ate"] is not None:
+        return jsonify({"erro": "Envie premium_ate nulo ao desativar."}), 400
+    colecao = conectar_db()["tbl_usuarios"]
+    administrador = colecao.find_one({"username": get_jwt_identity()})
+    if not bcrypt.check_password_hash(administrador["senha"], dados["senha"]):
+        return jsonify({"erro": "Senha inválida."}), 400
+    usuario = colecao.find_one({"username": username}, {"_id": 0, "senha": 0})
+    if usuario is None:
+        return jsonify({"erro": "Usuário não encontrado."}), 404
+    pagamento = {**dados_pagamento(usuario),
+                 "status": "active" if dados["ativa"] else "paused",
+                 "premium_ate": iso(fim) if dados["ativa"] else None}
+    # Evita sobrescrever uma atualização concorrente de outro admin ou webhook.
+    filtro = {"username": username, "pagamento": usuario["pagamento"] if "pagamento" in usuario else {"$exists": False}}
+    try:
+        resultado = colecao.update_one(filtro, {
+            "$set": {"pagamento": pagamento},
+            "$unset": {campo: "" for campo in CAMPOS_LEGADOS},
+        })
+    except PyMongoError:
+        return jsonify({"erro": "Não foi possível salvar a assinatura. Tente novamente."}), 503
+    if resultado.matched_count != 1:
+        return jsonify({"erro": "A assinatura mudou. Recarregue os usuários antes de tentar novamente."}), 409
+    atualizado = {chave: valor for chave, valor in usuario.items() if chave not in CAMPOS_LEGADOS}
+    atualizado["pagamento"] = pagamento
+    return jsonify(serializar_usuario_admin(atualizado)), 200
+
 
 @app.route("/admin/usuarios/<string:username>/status", methods=["PATCH"])
 @admin_required
