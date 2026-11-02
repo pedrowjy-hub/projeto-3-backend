@@ -236,3 +236,24 @@ O envio de e-mail usa SMTP da biblioteca padrão. Configure `SMTP_HOST` e
 e `SMTP_USER`/`SMTP_PASSWORD` são opcionais para relays sem autenticação.
 `FRONTEND_URL` define o domínio do link (padrão `http://localhost:5173`), cuja
 tela de redefinição deve ler o parâmetro `token` em `/redefinir-senha`.
+
+
+## Configuração do deploy atual
+
+O frontend usa URLs relativas em `/api`, que devem ser encaminhadas ao Flask
+pelo proxy do servidor. O proxy em `vite.config.js` atende apenas ao desenvolvimento
+local; o build não depende do endereço `127.0.0.1:5000` no computador do visitante.
+
+No ambiente do backend publicado, defina:
+
+```env
+FRONTEND_URL=http://35.175.183.126
+```
+
+Esse valor gera os links de recuperação de senha. Configure também as variáveis
+SMTP descritas acima para habilitar o envio. Quando o site receber um domínio com
+HTTPS, atualize `FRONTEND_URL` para esse endereço e reinicie o backend. No
+ambiente local, use `FRONTEND_URL=http://localhost:5173`.
+
+`MONGO_URI`, as credenciais dos provedores e os segredos de webhook devem estar
+no ambiente do backend do servidor. Não é necessário incluí-los no frontend.

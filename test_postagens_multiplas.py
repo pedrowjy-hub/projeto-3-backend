@@ -53,6 +53,10 @@ def test_postagem_aceita_arquivos_de_8mb(quantidade, auth):
 @pytest.mark.parametrize("count,size,status", [(4, 10, 400), (2, 0, 422), (2, TAMANHO_MAXIMO_MIDIA_POSTAGEM + 1, 413)])
 def test_limites_multiplos_arquivos(method, count, size, status, auth):
     with patch("api.conectar_db", return_value=defaultdict(MagicMock)) as conn:
+        # Conta concreta mantém a validação de autenticação antes de testar anexos.
+        conn.return_value["tbl_usuarios"].find_one.return_value = {
+            "username": "teste", "papel": "usuario", "ativo": True, "versao_senha": 0,
+        }
         url = "/postagens" if method == "post" else f"/postagens/{ObjectId()}"
         response = getattr(app.test_client(), method)(url, headers=auth, data={
             "titulo": "Título", "descricao": "Descrição", "midia": arquivos(count, size),
